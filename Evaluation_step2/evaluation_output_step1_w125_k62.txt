@@ -1,0 +1,34 @@
+=== Evaluation TextTiling ===
+
+Step 1 output: T:\Studium\Studium\a_Master\Digital_Humanities\2.Semester\Projekt\Github_Projekt\ausgabe_de\Output\output_step1_w125_k62.txt
+Ground truth: T:\Studium\Studium\a_Master\Digital_Humanities\2.Semester\Projekt\Github_Projekt\ausgabe_de\Grenzen_unendliche_Geschichte\grenzen_ground_truth_unendliche_geschichte.txt
+
+Ground truth boundaries according to file: 119
+Read ground truth boundaries: 119
+Predicted boundaries: 154
+
+TP: 8
+FP: 146
+FN: 111
+
+Precision: 0.0519
+Recall:    0.0672
+F1 score:  0.0586
+
+Distance analysis
+-----------------
+Exact matches: 8
+Matches within +/-1 paragraph: 26
+Matches within +/-2 paragraphs: 39
+Matches within +/-3 paragraphs: 47
+Matches within +/-5 paragraphs: 75
+
+True positive boundaries:
+272
+286
+545
+786
+802
+1156
+1365
+1703

@@ -77,7 +77,7 @@ class TextTilingTokenizer(TokenizerI):
         if stopwords is None:
             from nltk.corpus import stopwords
 
-            stopwords = stopwords.words("english")
+            stopwords = stopwords.words("german")
         self.__dict__.update(locals())
         del self.__dict__["self"]
 
@@ -93,7 +93,7 @@ class TextTilingTokenizer(TokenizerI):
 
         # Remove punctuation
         nopunct_text = "".join(
-            c for c in lowercase_text if re.match(r"[a-z\-' \n\t]", c)
+            c for c in lowercase_text if re.match(r"[^\W\d_]", c, re.UNICODE) or c in " \n\t"
         )
         nopunct_par_breaks = self._mark_paragraph_breaks(nopunct_text)
 
