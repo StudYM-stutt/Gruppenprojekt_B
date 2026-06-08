@@ -4,18 +4,13 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 
+BASE_DIR = Path(__file__).resolve().parent
 
 # Directory containing the evaluation files from step_2_evaluation.py
-EVALUATION_INPUT_DIR = (
-    r"T:\Studium\Studium\a_Master\Digital_Humanities\2.Semester"
-    r"\Projekt\Github_Projekt\ausgabe_de\Evaluation_step2"
-)
+EVALUATION_INPUT_DIR = BASE_DIR / "step_2_output"
 
 # Directory for visualization output files
-VISUALIZATION_OUTPUT_DIR = (
-    r"T:\Studium\Studium\a_Master\Digital_Humanities\2.Semester"
-    r"\Projekt\Github_Projekt\ausgabe_de\Visualization_step3"
-)
+VISUALIZATION_OUTPUT_DIR = BASE_DIR / "step_3_output"
 
 EVALUATION_FILE_PATTERN = "evaluation_output_step1_w*_k*.txt"
 PARAMETER_PATTERN = re.compile(

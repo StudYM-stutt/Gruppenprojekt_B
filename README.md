@@ -12,15 +12,22 @@ pip install -r requirements.txt
 
 ## Usage
 
-Replace the file paths in `main.py` with your own paths:
+### Step 1 
+step_1_texttiling.py needs: 
+Goldstandard Text in "step_1_input" with the name "g_Standard.txt"
 
-```python
-INPUT_FILE = r"path/to/your/input_file.txt"
-OUTPUT_FILE = r"path/to/your/output_file.txt"
-```
+**Change Language**:
+needs to be changed depending on task. Can be found in step_1_texttiling.py at the start. 
+"""
+from texttiling_de import TextTilingTokenizer
+#from texttiling_eng import TextTilingTokenizer
+"""
 
-Run the script:
+### Step 2 
+step_2_evaluation_batch_distance.py needs: 
+step_1_output --> should work automatically 
+Goldstandard Grenzen in "Grenzen" with the name "g_grenzen.txt" 
 
-```bash
-python main.py
-```
+### Step 3 
+step_3_visualization_distance.py
+--> should work automatically

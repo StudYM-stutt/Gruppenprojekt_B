@@ -1,30 +1,40 @@
 from pathlib import Path
 
+#Change Languages
 from texttiling_de import TextTilingTokenizer
+#from texttiling_eng import TextTilingTokenizer
 
+BASE_DIR = Path(__file__).resolve().parent
 
 INPUT_FILE = (
-    r"T:\Studium\Studium\a_Master\Digital_Humanities\2.Semester"
-    r"\Projekt\Github_Projekt\ausgabe_de\Input"
-    r"\g_standard_die_unendliche_Geschichte_ohne_Grenzen_am_Dokumentanfang.txt"
+    BASE_DIR
+    / "step_1_input"
+    / "g_Standard.txt"
 )
 
-OUTPUT_DIR = (
-    r"T:\Studium\Studium\a_Master\Digital_Humanities\2.Semester"
-    r"\Projekt\Github_Projekt\ausgabe_de\Output"
-)
+OUTPUT_DIR = BASE_DIR / "step_1_output"
 
 TEXTTILING_PARAMETERS = {
+    "w20_k10": {"w": 20, "k": 10},
+    "w40_k20": {"w": 40, "k": 20},
+    "w60_k30": {"w": 60, "k": 30},
+    "w80_k40": {"w": 80, "k": 40},
+    "w100_k50": {"w": 100, "k": 50},
+    "w110_k55": {"w": 110, "k": 55},
+    "w120_k60": {"w": 120, "k": 60},
     "w125_k62": {"w": 125, "k": 62},
     "w130_k65": {"w": 130, "k": 65},
     "w135_k67": {"w": 135, "k": 67},
     "w140_k70": {"w": 140, "k": 70},
     "w145_k72": {"w": 145, "k": 72},
+    "w150_k75": {"w": 150, "k": 75},
+    "w160_k80": {"w": 160, "k": 80},
     "w170_k85": {"w": 170, "k": 85},
     "w175_k87": {"w": 175, "k": 87},
     "w180_k90": {"w": 180, "k": 90},
     "w185_k92": {"w": 185, "k": 92},
     "w190_k95": {"w": 190, "k": 95},
+    "w200_k100": {"w": 200, "k": 100},
 }
 
 

@@ -1,25 +1,21 @@
 import re
 from pathlib import Path
 
+BASE_DIR = Path(__file__).resolve().parent
 
 # Directory containing the output files from step_1_texttiling.py
-STEP1_OUTPUT_DIR = (
-    r"T:\Studium\Studium\a_Master\Digital_Humanities\2.Semester"
-    r"\Projekt\Github_Projekt\ausgabe_de\Output"
-)
+
+STEP1_OUTPUT_DIR = BASE_DIR / "step_1_output"
 
 # Ground truth file
 GROUND_TRUTH_FILE = (
-    r"T:\Studium\Studium\a_Master\Digital_Humanities\2.Semester"
-    r"\Projekt\Github_Projekt\ausgabe_de\Grenzen_unendliche_Geschichte"
-    r"\grenzen_ground_truth_unendliche_geschichte.txt"
+    BASE_DIR
+    / "Grenzen"
+    / "g_grenzen.txt"
 )
 
 # Directory for evaluation output files
-EVALUATION_OUTPUT_DIR = (
-    r"T:\Studium\Studium\a_Master\Digital_Humanities\2.Semester"
-    r"\Projekt\Github_Projekt\ausgabe_de\Evaluation_step2"
-)
+EVALUATION_OUTPUT_DIR = BASE_DIR / "step_2_output"
 
 STEP1_OUTPUT_PATTERN = "output_step1_w*_k*.txt"
 PARAMETER_PATTERN = re.compile(r"output_step1_w(\d+)_k(\d+)\.txt$")
