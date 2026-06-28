@@ -35,10 +35,10 @@ step_3_visualization_distance.py
 ### Step 4
 needs:
 
-# pip3 install openai
-# pip install open
-# node --version
-# npm install openai
+bash: pip3 install openai
+bash: pip install open
+bash: node --version
+bash: npm install openai
 
 step_4_llm.py
 put Prompts in .txt into prompt folder.
