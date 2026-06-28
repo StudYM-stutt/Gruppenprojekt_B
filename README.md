@@ -65,5 +65,7 @@ python step_4_llm.py \
   --temperature 0
 
 #if prompts got actualized, make sure to clean cache
+bash: 
 rm -rf llm_cache_step4
+bash: 
 rm -rf step_4_output
