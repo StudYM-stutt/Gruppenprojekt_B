@@ -31,3 +31,39 @@ Goldstandard Grenzen in "Grenzen" with the name "g_grenzen.txt"
 ### Step 3 
 step_3_visualization_distance.py
 --> should work automatically
+
+### Step 4
+
+step_4_llm.py
+put Prompts in .txt into prompt folder.
+Terminal: 
+
+bash.
+export OPENAI_API_KEY="##key_link###"
+
+bash: 
+echo $OPENAI_API_KEY 
+
+bash:
+python -c "
+from openai import OpenAI
+client = OpenAI()
+r = client.responses.create(
+    model='gpt-4o-mini',
+    input='Sag nur: Test erfolgreich'
+)
+print(r.output_text)
+"
+
+##select parameters and model 
+bash:
+python step_4_llm.py \
+  --provider openai \
+  --model gpt-4o-mini \
+  --batch-size 40 \
+  --context-size 3 \
+  --temperature 0
+
+#if prompts got actualized, make sure to clean cache
+rm -rf llm_cache_step4
+rm -rf step_4_output
