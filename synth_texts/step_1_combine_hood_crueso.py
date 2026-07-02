@@ -31,9 +31,13 @@ from pathlib import Path
 # ============================================================
 # CONFIGURATION
 # ============================================================
-PFAD_CRUSOE   = Path(__file__).parent / "RobinsonCrusoe.txt"
-PFAD_ROBIN    = Path(__file__).parent / "robinHood.txt"
-OUTPUT_DIR    = Path(__file__).parent / "Output_Synth"
+
+SCRIPT_DIR = Path(__file__).parent
+
+PFAD_ROBIN = SCRIPT_DIR / "step_1_input" / "robin_hood.txt"
+PFAD_CRUSOE = SCRIPT_DIR / "step_1_input" / "robinson_crusoe.txt"
+
+OUTPUT_DIR    = SCRIPT_DIR / "step_1_output"
 MIN_LAENGE    = 150       # minimum paragraph length in characters
 SWITCH_PROB   = 0.05      # 5% chance of switching to the other story
 N_VARIANTS    = 20        # number of variants to produce
