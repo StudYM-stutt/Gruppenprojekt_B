@@ -1,5 +1,6 @@
 import csv
 import re
+from collections import defaultdict
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -8,17 +9,22 @@ BASE_DIR = Path(__file__).resolve().parent
 
 # Directory containing the evaluation files from step_4_llm.py.
 # The search is recursive because step_4 writes files into nested folders like:
-# step_4_output/llm_ollama_qwen3_8b_batched/Prompt_01/evaluation_output_step4_Prompt_01_bs10_cs3.txt
+# step_4_output/variant_01/llm_ollama_qwen3_8b_batched/Prompt_01/evaluation_output_step4_Prompt_01_bs10_cs3.txt
 EVALUATION_INPUT_DIR = BASE_DIR / "step_4_output"
 
-# Directory for visualization output files
-VISUALIZATION_OUTPUT_DIR = BASE_DIR / "step_3_output"
+# Directory for Step 5 visualization output files.
+VISUALIZATION_OUTPUT_DIR = BASE_DIR / "step_5_output"
 
 EVALUATION_FILE_PATTERN = "evaluation_output_step4_*_bs*_cs*.txt"
 PARAMETER_PATTERN = re.compile(
     r"evaluation_output_step4_(?P<prompt>.+)_bs(?P<batch_size>\d+)_cs(?P<context_size>\d+)\.txt$"
 )
-RUN_DIR_PATTERN = re.compile(r"^llm_(?P<provider>.+)_(?P<model>.+)_batched$")
+
+# Extract provider and model from run directories such as:
+# llm_dryrun_gpt-4o-mini_batched
+# llm_ollama_qwen3_8b_batched
+# This stays extensible because everything between provider and _batched is treated as model name.
+RUN_DIR_PATTERN = re.compile(r"^llm_(?P<provider>[^_]+)_(?P<model>.+)_batched$")
 
 METRIC_PATTERNS = {
     "ground_truth_boundaries": re.compile(r"Read ground truth boundaries:\s*(\d+)"),
@@ -37,10 +43,24 @@ METRIC_PATTERNS = {
 }
 
 
+def slugify(value):
+    """Create a safe file-name component."""
+    value = str(value).strip()
+    value = re.sub(r"[^A-Za-z0-9_.-]+", "_", value)
+    return value.strip("_") or "unknown"
+
+
+def prompt_sort_key(prompt_name):
+    """Sort Prompt_01, Prompt_02, ... numerically if possible."""
+    match = re.search(r"(\d+)$", prompt_name)
+    if match:
+        return int(match.group(1))
+    return prompt_name
+
+
 def get_evaluation_files():
     """Return all matching Step 4 evaluation files recursively."""
-    input_dir = Path(EVALUATION_INPUT_DIR)
-    files = sorted(input_dir.rglob(EVALUATION_FILE_PATTERN))
+    files = sorted(EVALUATION_INPUT_DIR.rglob(EVALUATION_FILE_PATTERN))
 
     return [
         file_path
@@ -71,6 +91,15 @@ def get_run_values(file_path):
             return match.group("provider"), match.group("model")
 
     return "unknown", "unknown"
+
+
+def get_variant(file_path):
+    """Extract the synthetic variant folder name, e.g. variant_01."""
+    for parent in file_path.parents:
+        if parent.name.startswith("variant_"):
+            return parent.name
+
+    return "unknown_variant"
 
 
 def parse_metric(text, metric_name):
@@ -112,6 +141,7 @@ def parse_evaluation_file(file_path):
     text = file_path.read_text(encoding="utf-8")
     prompt_name, batch_size, context_size = get_parameter_values(file_path)
     provider, model = get_run_values(file_path)
+    variant = get_variant(file_path)
 
     true_positives = parse_metric(text, "true_positives")
     false_positives = parse_metric(text, "false_positives")
@@ -130,14 +160,17 @@ def parse_evaluation_file(file_path):
         false_negatives,
     )
 
-    parameter = f"{prompt_name}_bs{batch_size}_cs{context_size}"
+    parameter = f"{model}_{prompt_name}_bs{batch_size}_cs{context_size}"
+    group_name = f"{variant}_{model}_bs{batch_size}_cs{context_size}"
 
     return {
         "source_file": str(file_path.relative_to(EVALUATION_INPUT_DIR)),
+        "variant": variant,
         "prompt_name": prompt_name,
         "provider": provider,
         "model": model,
         "parameter": parameter,
+        "group_name": group_name,
         "batch_size": batch_size,
         "context_size": context_size,
         "ground_truth_boundaries": ground_truth_boundaries,
@@ -177,17 +210,41 @@ def load_evaluation_results():
     return sorted(
         results,
         key=lambda result: (
-            result["provider"],
+            result["variant"],
             result["model"],
-            result["prompt_name"],
             result["batch_size"],
             result["context_size"],
+            prompt_sort_key(result["prompt_name"]),
         ),
     )
 
 
-def create_metric_plot(results, output_path):
-    """Create a plot for precision, recall, and F1 score."""
+def group_results(results):
+    """Group results by identical variant, model, batch size and context size."""
+    grouped_results = defaultdict(list)
+
+    for result in results:
+        group_key = (
+            result["variant"],
+            result["model"],
+            result["batch_size"],
+            result["context_size"],
+        )
+        grouped_results[group_key].append(result)
+
+    return grouped_results
+
+
+def make_group_output_dir(output_dir, group_key):
+    """Create one output subfolder per variant + model + parameter setting."""
+    variant, model, batch_size, context_size = group_key
+    group_dir = output_dir / variant / f"{slugify(model)}_bs{batch_size}_cs{context_size}"
+    group_dir.mkdir(parents=True, exist_ok=True)
+    return group_dir
+
+
+def create_metric_plot(results, output_path, title_prefix):
+    """Create a grouped plot for precision, recall and F1 score."""
     labels = [result["parameter"] for result in results]
     precision_values = [result["precision"] for result in results]
     recall_values = [result["recall"] for result in results]
@@ -198,8 +255,8 @@ def create_metric_plot(results, output_path):
     plt.plot(labels, recall_values, marker="o", label="Recall")
     plt.plot(labels, f1_values, marker="o", label="F1 score")
 
-    plt.title("Step 4 LLM evaluation by prompt and parameter setting")
-    plt.xlabel("Prompt and parameter setting")
+    plt.title(f"{title_prefix}: Precision, Recall and F1")
+    plt.xlabel("Prompt")
     plt.ylabel("Score")
     plt.ylim(0, 1)
     plt.grid(True, axis="y", linestyle="--", alpha=0.7)
@@ -207,13 +264,13 @@ def create_metric_plot(results, output_path):
     plt.xticks(rotation=45, ha="right")
     plt.tight_layout()
 
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(output_path, dpi=300)
     plt.close()
 
 
-def create_distance_plot(results, output_path):
-    """Create a plot for cumulative distance-based matches."""
+def create_distance_plot(results, output_path, title_prefix):
+    """Create a grouped plot for cumulative distance-based matches."""
     labels = [result["parameter"] for result in results]
 
     exact_values = [result["exact_matches"] for result in results]
@@ -239,21 +296,21 @@ def create_distance_plot(results, output_path):
             fontsize=8,
         )
 
-    plt.title("Step 4 distance-based boundary matches")
-    plt.xlabel("Prompt and parameter setting")
+    plt.title(f"{title_prefix}: Distance-based boundary matches")
+    plt.xlabel("Prompt")
     plt.ylabel("Number of matched ground truth boundaries")
     plt.grid(True, axis="y", linestyle="--", alpha=0.7)
     plt.legend()
     plt.xticks(rotation=45, ha="right")
     plt.tight_layout()
 
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(output_path, dpi=300)
     plt.close()
 
 
-def create_distance_curve_plot(results, output_path):
-    """Create a readable curve for distance thresholds."""
+def create_distance_curve_plot(results, output_path, title_prefix):
+    """Create one grouped curve plot for distance thresholds."""
     plt.figure(figsize=(12, 7))
     thresholds = [0, 1, 2, 3, 5]
 
@@ -278,7 +335,7 @@ def create_distance_curve_plot(results, output_path):
                 fontsize=7,
             )
 
-    plt.title("Step 4 cumulative boundary matches by distance threshold")
+    plt.title(f"{title_prefix}: Cumulative boundary matches by distance threshold")
     plt.xlabel("Maximum distance in paragraphs")
     plt.ylabel("Matched ground truth boundaries")
     plt.xticks(thresholds)
@@ -286,21 +343,23 @@ def create_distance_curve_plot(results, output_path):
     plt.legend(fontsize=8, ncol=2)
     plt.tight_layout()
 
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(output_path, dpi=300)
     plt.close()
 
 
 def write_results_table(results, output_path):
     """Write the evaluation results as a CSV table."""
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     fieldnames = [
         "source_file",
+        "variant",
         "prompt_name",
         "provider",
         "model",
         "parameter",
+        "group_name",
         "batch_size",
         "context_size",
         "ground_truth_boundaries",
@@ -324,7 +383,7 @@ def write_results_table(results, output_path):
         "within_5_share",
     ]
 
-    with open(output_path, "w", encoding="utf-8", newline="") as file:
+    with output_path.open("w", encoding="utf-8", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames, delimiter=";")
         writer.writeheader()
 
@@ -342,40 +401,72 @@ def write_results_table(results, output_path):
             writer.writerow(row)
 
 
-def print_summary(results, metric_plot_file, distance_plot_file, distance_curve_file, table_file):
+def write_grouped_outputs(grouped_results, output_dir):
+    """Write plots and tables for every model + bs/cs group."""
+    created_files = []
+
+    for group_key, group in sorted(grouped_results.items()):
+        variant, model, batch_size, context_size = group_key
+        group = sorted(group, key=lambda result: prompt_sort_key(result["prompt_name"]))
+        group_dir = make_group_output_dir(output_dir, group_key)
+        title_prefix = f"{variant} {model} bs{batch_size} cs{context_size}"
+        file_prefix = f"{slugify(variant)}_{slugify(model)}_bs{batch_size}_cs{context_size}"
+
+        metric_plot_file = group_dir / f"{file_prefix}_precision_recall_f1_plot.png"
+        distance_plot_file = group_dir / f"{file_prefix}_distance_matches_plot.png"
+        distance_curve_file = group_dir / f"{file_prefix}_distance_threshold_curve.png"
+        table_file = group_dir / f"{file_prefix}_evaluation_results_table.csv"
+
+        create_metric_plot(group, metric_plot_file, title_prefix)
+        create_distance_plot(group, distance_plot_file, title_prefix)
+        create_distance_curve_plot(group, distance_curve_file, title_prefix)
+        write_results_table(group, table_file)
+
+        created_files.extend([
+            metric_plot_file,
+            distance_plot_file,
+            distance_curve_file,
+            table_file,
+        ])
+
+    return created_files
+
+
+def print_summary(results, grouped_results, created_files, full_table_file):
     """Print a short summary for the generated files."""
-    print("Visualization completed.")
+    print("Step 5 visualization completed.")
     print(f"Processed evaluation files: {len(results)}")
-    print(f"Metric plot saved to: {metric_plot_file}")
-    print(f"Distance plot saved to: {distance_plot_file}")
-    print(f"Distance curve saved to: {distance_curve_file}")
-    print(f"Result table saved to: {table_file}")
+    print(f"Created model/parameter groups: {len(grouped_results)}")
+    print(f"Complete result table saved to: {full_table_file}")
     print()
 
-    for result in results:
+    for group_key, group in sorted(grouped_results.items()):
+        variant, model, batch_size, context_size = group_key
         print(
-            "Processed "
-            f"{result['source_file']} "
-            f"({result['parameter']})."
+            f"Group {variant}_{model}_bs{batch_size}_cs{context_size}: "
+            f"{len(group)} prompt file(s)"
         )
+
+    print("\nCreated output files:")
+    for file_path in created_files:
+        print(file_path)
 
 
 def main():
-    """Create visualizations for all Step 4 evaluation files."""
+    """Create grouped visualizations for all Step 4 evaluation files."""
     results = load_evaluation_results()
+    grouped_results = group_results(results)
 
     output_dir = Path(VISUALIZATION_OUTPUT_DIR)
-    metric_plot_file = output_dir / "step4_precision_recall_f1_plot.png"
-    distance_plot_file = output_dir / "step4_distance_matches_plot.png"
-    distance_curve_file = output_dir / "step4_distance_threshold_curve.png"
-    table_file = output_dir / "step4_evaluation_results_table.csv"
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    create_metric_plot(results, metric_plot_file)
-    create_distance_plot(results, distance_plot_file)
-    create_distance_curve_plot(results, distance_curve_file)
-    write_results_table(results, table_file)
+    full_table_file = output_dir / "step5_all_evaluation_results_table.csv"
+    write_results_table(results, full_table_file)
 
-    print_summary(results, metric_plot_file, distance_plot_file, distance_curve_file, table_file)
+    created_files = write_grouped_outputs(grouped_results, output_dir)
+    created_files.insert(0, full_table_file)
+
+    print_summary(results, grouped_results, created_files, full_table_file)
 
 
 if __name__ == "__main__":

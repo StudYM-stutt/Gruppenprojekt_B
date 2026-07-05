@@ -32,11 +32,41 @@ except ImportError:  # only needed for Ollama
 
 BASE_DIR = Path(__file__).resolve().parent
 
-INPUT_FILE = BASE_DIR / "step_1_input" / "g_Standard.txt"
+STEP1_OUTPUT_DIR = BASE_DIR / "step_1_output"
 OUTPUT_DIR = BASE_DIR / "step_4_output"
 CACHE_DIR = BASE_DIR / "llm_cache_step4"
-PROMPT_DIR = BASE_DIR / "prompts"
-GROUND_TRUTH_FILE = BASE_DIR / "Grenzen" / "g_grenzen.txt"
+PROMPT_DIR = BASE_DIR / "step_4_prompt_input"
+
+# Used only to keep cached LLM responses separated by synthetic variant.
+CURRENT_VARIANT_NAME = "single_dataset"
+
+
+# ==========================================================
+# Default configuration
+# ==========================================================
+# These values are used when you run the script without the
+# corresponding command-line arguments. You can change them here
+# for repeated experiments. Command-line arguments still override
+# these defaults.
+
+DEFAULT_BATCH_MODE = "words"          # "words" or "paragraphs"
+
+# Only relevant when DEFAULT_BATCH_MODE = "paragraphs"
+DEFAULT_BATCH_SIZE = 40
+
+# Only relevant when DEFAULT_BATCH_MODE = "words"
+DEFAULT_MIN_BATCH_WORDS = 650
+DEFAULT_MAX_BATCH_WORDS = 1100
+
+# Context handling
+DEFAULT_DYNAMIC_CONTEXT = True
+
+# Only relevant when dynamic context is disabled
+DEFAULT_CONTEXT_SIZE = 3
+
+# Only relevant when dynamic context is enabled
+DEFAULT_MIN_CONTEXT_WORDS = 180
+DEFAULT_MAX_CONTEXT_PARAGRAPHS = 12
 
 
 USER_PROMPT_TEMPLATE = """
@@ -190,7 +220,16 @@ def format_context(paragraphs: Iterable[Paragraph]) -> str:
     return "\n\n".join(lines) if lines else "(kein Kontext)"
 
 
-def create_batches(paragraphs: list[Paragraph], batch_size: int) -> list[Batch]:
+def count_words(text: str) -> int:
+    """Approximate word count. Keeps paragraph boundaries untouched."""
+    return len(re.findall(r"\S+", text))
+
+
+def count_paragraph_words(paragraphs: Iterable[Paragraph]) -> int:
+    return sum(count_words(paragraph.text) for paragraph in paragraphs)
+
+
+def create_batches_by_paragraph_count(paragraphs: list[Paragraph], batch_size: int) -> list[Batch]:
     if batch_size < 1:
         raise ValueError("batch_size must be at least 1.")
 
@@ -208,40 +247,174 @@ def create_batches(paragraphs: list[Paragraph], batch_size: int) -> list[Batch]:
     return batches
 
 
-def build_batch_prompt(paragraphs: list[Paragraph], batch: Batch, context_size: int) -> str:
+def create_batches_by_word_count(
+    paragraphs: list[Paragraph],
+    min_batch_words: int,
+    max_batch_words: int,
+) -> list[Batch]:
+    """
+    Create batches by word count instead of paragraph count.
+
+    Short paragraphs are automatically grouped until at least min_batch_words
+    are reached. Paragraphs are never split. If a single paragraph is longer
+    than max_batch_words, it becomes its own batch.
+    """
+    if min_batch_words < 1:
+        raise ValueError("min_batch_words must be at least 1.")
+    if max_batch_words < min_batch_words:
+        raise ValueError("max_batch_words must be greater than or equal to min_batch_words.")
+
+    batches: list[Batch] = []
+    start_index = 0
+    current: list[Paragraph] = []
+    current_words = 0
+
+    for index, paragraph in enumerate(paragraphs):
+        paragraph_words = count_words(paragraph.text)
+
+        would_exceed_max = current and current_words + paragraph_words > max_batch_words
+        reached_min = current_words >= min_batch_words
+
+        if would_exceed_max and reached_min:
+            batches.append(
+                Batch(
+                    batch_index=len(batches) + 1,
+                    start_index=start_index,
+                    end_index=index,
+                    paragraphs=current,
+                )
+            )
+            start_index = index
+            current = []
+            current_words = 0
+
+        current.append(paragraph)
+        current_words += paragraph_words
+
+    if current:
+        batches.append(
+            Batch(
+                batch_index=len(batches) + 1,
+                start_index=start_index,
+                end_index=len(paragraphs),
+                paragraphs=current,
+            )
+        )
+
+    return batches
+
+
+def create_batches(
+    paragraphs: list[Paragraph],
+    batch_size: int,
+    batch_mode: str,
+    min_batch_words: int,
+    max_batch_words: int,
+) -> list[Batch]:
+    if batch_mode == "paragraphs":
+        return create_batches_by_paragraph_count(paragraphs, batch_size)
+    if batch_mode == "words":
+        return create_batches_by_word_count(paragraphs, min_batch_words, max_batch_words)
+    raise ValueError(f"Unsupported batch mode: {batch_mode}")
+
+
+def get_dynamic_context_slice(
+    paragraphs: list[Paragraph],
+    start_index: int,
+    direction: str,
+    min_context_words: int,
+    max_context_paragraphs: int,
+) -> list[Paragraph]:
+    """
+    Collect context paragraphs until min_context_words is reached or
+    max_context_paragraphs is reached. Paragraphs are never split.
+    """
+    if min_context_words <= 0 or max_context_paragraphs <= 0:
+        return []
+
+    selected: list[Paragraph] = []
+    word_count = 0
+
+    if direction == "left":
+        index = start_index - 1
+        while index >= 0 and len(selected) < max_context_paragraphs and word_count < min_context_words:
+            selected.insert(0, paragraphs[index])
+            word_count += count_words(paragraphs[index].text)
+            index -= 1
+        return selected
+
+    if direction == "right":
+        index = start_index
+        while index < len(paragraphs) and len(selected) < max_context_paragraphs and word_count < min_context_words:
+            selected.append(paragraphs[index])
+            word_count += count_words(paragraphs[index].text)
+            index += 1
+        return selected
+
+    raise ValueError("direction must be 'left' or 'right'.")
+
+
+def build_batch_prompt(
+    paragraphs: list[Paragraph],
+    batch: Batch,
+    context_size: int,
+    dynamic_context: bool,
+    min_context_words: int,
+    max_context_paragraphs: int,
+) -> str:
     if context_size < 0:
         raise ValueError("context_size must be 0 or greater.")
 
-    left_start = max(0, batch.start_index - context_size)
-    right_end = min(len(paragraphs), batch.end_index + context_size)
+    if dynamic_context:
+        left_context = get_dynamic_context_slice(
+            paragraphs=paragraphs,
+            start_index=batch.start_index,
+            direction="left",
+            min_context_words=min_context_words,
+            max_context_paragraphs=max_context_paragraphs,
+        )
+        right_context = get_dynamic_context_slice(
+            paragraphs=paragraphs,
+            start_index=batch.end_index,
+            direction="right",
+            min_context_words=min_context_words,
+            max_context_paragraphs=max_context_paragraphs,
+        )
+    else:
+        left_start = max(0, batch.start_index - context_size)
+        right_end = min(len(paragraphs), batch.end_index + context_size)
+        left_context = paragraphs[left_start:batch.start_index]
+        right_context = paragraphs[batch.end_index:right_end]
 
     return USER_PROMPT_TEMPLATE.format(
-        left_context=format_context(paragraphs[left_start:batch.start_index]),
+        left_context=format_context(left_context),
         batch_paragraphs=format_context(batch.paragraphs),
-        right_context=format_context(paragraphs[batch.end_index:right_end]),
+        right_context=format_context(right_context),
     )
 
 
-def cache_path(provider: str, model: str, prompt_config: PromptConfig, batch: Batch) -> Path:
+def cache_path(provider: str, model: str, prompt_config: PromptConfig, batch: Batch, user_prompt: str) -> Path:
     start_id = batch.paragraphs[0].paragraph_id
     end_id = batch.paragraphs[-1].paragraph_id
+    prompt_hash = hashlib.sha256(user_prompt.encode("utf-8")).hexdigest()[:12]
     return (
         CACHE_DIR
+        / CURRENT_VARIANT_NAME
         / f"{slugify(provider)}_{slugify(model)}"
         / f"{prompt_config.name}_{prompt_config.content_hash}"
-        / f"batch_{batch.batch_index:04d}_{start_id}_{end_id}.txt"
+        / f"batch_{batch.batch_index:04d}_{start_id}_{end_id}_{prompt_hash}.txt"
     )
 
 
-def load_cached_batch(provider: str, model: str, prompt_config: PromptConfig, batch: Batch) -> str | None:
-    path = cache_path(provider, model, prompt_config, batch)
+def load_cached_batch(provider: str, model: str, prompt_config: PromptConfig, batch: Batch, user_prompt: str) -> str | None:
+    path = cache_path(provider, model, prompt_config, batch, user_prompt)
     if path.exists():
         return path.read_text(encoding="utf-8")
     return None
 
 
-def save_cached_batch(provider: str, model: str, prompt_config: PromptConfig, batch: Batch, raw_response: str) -> None:
-    path = cache_path(provider, model, prompt_config, batch)
+def save_cached_batch(provider: str, model: str, prompt_config: PromptConfig, batch: Batch, user_prompt: str, raw_response: str) -> None:
+    path = cache_path(provider, model, prompt_config, batch, user_prompt)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(raw_response, encoding="utf-8")
 
@@ -342,13 +515,25 @@ def predict_boundaries_batched(
     provider: str,
     model: str,
     batch_size: int,
+    batch_mode: str,
+    min_batch_words: int,
+    max_batch_words: int,
     context_size: int,
+    dynamic_context: bool,
+    min_context_words: int,
+    max_context_paragraphs: int,
     temperature: float,
     ollama_url: str,
     sleep_seconds: float,
     use_cache: bool,
 ) -> tuple[set[int], list[BatchDecision]]:
-    batches = create_batches(paragraphs, batch_size)
+    batches = create_batches(
+        paragraphs=paragraphs,
+        batch_size=batch_size,
+        batch_mode=batch_mode,
+        min_batch_words=min_batch_words,
+        max_batch_words=max_batch_words,
+    )
     all_boundaries: set[int] = set()
     batch_decisions: list[BatchDecision] = []
     first_paragraph_id = paragraphs[0].paragraph_id
@@ -358,9 +543,19 @@ def predict_boundaries_batched(
         end_id = batch.paragraphs[-1].paragraph_id
         print(f"Checking batch {batch.batch_index}/{len(batches)} ([{start_id}]–[{end_id}]) ...")
 
-        raw_response = load_cached_batch(provider, model, prompt_config, batch) if use_cache else None
+        batch_words = count_paragraph_words(batch.paragraphs)
+        print(f"  Paragraphs: {len(batch.paragraphs)} | Words: {batch_words}")
+
+        user_prompt = build_batch_prompt(
+            paragraphs=paragraphs,
+            batch=batch,
+            context_size=context_size,
+            dynamic_context=dynamic_context,
+            min_context_words=min_context_words,
+            max_context_paragraphs=max_context_paragraphs,
+        )
+        raw_response = load_cached_batch(provider, model, prompt_config, batch, user_prompt) if use_cache else None
         if raw_response is None:
-            user_prompt = build_batch_prompt(paragraphs, batch, context_size)
             raw_response = call_llm(
                 provider=provider,
                 model=model,
@@ -370,7 +565,7 @@ def predict_boundaries_batched(
                 ollama_url=ollama_url,
             )
             if use_cache:
-                save_cached_batch(provider, model, prompt_config, batch, raw_response)
+                save_cached_batch(provider, model, prompt_config, batch, user_prompt, raw_response)
             if sleep_seconds > 0:
                 time.sleep(sleep_seconds)
 
@@ -606,8 +801,14 @@ def write_summary(summary_rows: list[dict[str, str | int | float]], output_file:
         "prompt_file",
         "provider",
         "model",
+        "batch_mode",
         "batch_size",
+        "min_batch_words",
+        "max_batch_words",
         "context_size",
+        "dynamic_context",
+        "min_context_words",
+        "max_context_paragraphs",
         "predicted_boundaries",
         "boundary_output_file",
         "segment_output_file",
@@ -621,15 +822,30 @@ def write_summary(summary_rows: list[dict[str, str | int | float]], output_file:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run Step 4 LLM segmentation and write one evaluation report per prompt.")
-    parser.add_argument("--input", type=Path, default=INPUT_FILE)
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run Step 4 LLM segmentation for all synthetic variants and "
+            "write one evaluation report per variant and prompt."
+        )
+    )
+    parser.add_argument(
+        "--input-dir",
+        type=Path,
+        default=STEP1_OUTPUT_DIR,
+        help="Directory containing variant_XX folders from the synthetic text generation step.",
+    )
     parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
     parser.add_argument("--prompt-dir", type=Path, default=PROMPT_DIR)
-    parser.add_argument("--ground-truth", type=Path, default=GROUND_TRUTH_FILE)
     parser.add_argument("--provider", choices=["openai", "ollama", "dryrun"], default="dryrun")
     parser.add_argument("--model", default="gpt-4o-mini")
-    parser.add_argument("--batch-size", type=int, default=40)
-    parser.add_argument("--context-size", type=int, default=3)
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="Paragraphs per batch if --batch-mode paragraphs is used.")
+    parser.add_argument("--batch-mode", choices=["paragraphs", "words"], default=DEFAULT_BATCH_MODE, help="Use fixed paragraph batches or dynamic word-count batches.")
+    parser.add_argument("--min-batch-words", type=int, default=DEFAULT_MIN_BATCH_WORDS, help="Minimum words per dynamic batch if possible.")
+    parser.add_argument("--max-batch-words", type=int, default=DEFAULT_MAX_BATCH_WORDS, help="Maximum words per dynamic batch if possible. Single longer paragraphs are kept whole.")
+    parser.add_argument("--context-size", type=int, default=DEFAULT_CONTEXT_SIZE, help="Paragraphs per side if dynamic context is disabled.")
+    parser.add_argument("--dynamic-context", action=argparse.BooleanOptionalAction, default=DEFAULT_DYNAMIC_CONTEXT, help="Grow context until --min-context-words is reached.")
+    parser.add_argument("--min-context-words", type=int, default=DEFAULT_MIN_CONTEXT_WORDS, help="Minimum words per side for dynamic context if possible.")
+    parser.add_argument("--max-context-paragraphs", type=int, default=DEFAULT_MAX_CONTEXT_PARAGRAPHS, help="Safety limit for dynamic context paragraphs per side.")
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--ollama-url", default=os.getenv("OLLAMA_URL", "http://localhost:11434"))
     parser.add_argument("--sleep", type=float, default=0.0, help="Seconds to wait between API calls.")
@@ -637,103 +853,229 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def get_variant_dirs(input_dir: Path) -> list[Path]:
+    """Return all synthetic variant folders that contain the required files."""
+    if not input_dir.exists():
+        raise FileNotFoundError(f"Input directory not found: {input_dir}")
+
+    variant_dirs = sorted(
+        path for path in input_dir.glob("variant_*")
+        if path.is_dir()
+    )
+
+    if not variant_dirs:
+        raise FileNotFoundError(
+            f"No variant_* folders found in: {input_dir}"
+        )
+
+    valid_variant_dirs = []
+    for variant_dir in variant_dirs:
+        input_file = variant_dir / "paragraphs_numbered.txt"
+        ground_truth_file = variant_dir / "g_grenzen_paragraph.txt"
+
+        if not input_file.exists():
+            print(f"Skipping {variant_dir.name}: missing {input_file.name}")
+            continue
+
+        if not ground_truth_file.exists():
+            print(f"Skipping {variant_dir.name}: missing {ground_truth_file.name}")
+            continue
+
+        valid_variant_dirs.append(variant_dir)
+
+    if not valid_variant_dirs:
+        raise FileNotFoundError(
+            f"No usable variant folders found in: {input_dir}. "
+            "Each variant needs paragraphs_numbered.txt and g_grenzen_paragraph.txt."
+        )
+
+    return valid_variant_dirs
+
+
+def append_global_summary(
+    summary_rows: list[dict[str, str | int | float]],
+    output_file: Path,
+) -> None:
+    """Write a cross-variant summary file."""
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "variant",
+        "prompt_name",
+        "prompt_file",
+        "provider",
+        "model",
+        "batch_mode",
+        "batch_size",
+        "min_batch_words",
+        "max_batch_words",
+        "context_size",
+        "dynamic_context",
+        "min_context_words",
+        "max_context_paragraphs",
+        "predicted_boundaries",
+        "boundary_output_file",
+        "segment_output_file",
+        "batch_output_file",
+        "evaluation_output_file",
+    ]
+    with output_file.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames, delimiter=";")
+        writer.writeheader()
+        writer.writerows(summary_rows)
+
 def main() -> None:
+    global CURRENT_VARIANT_NAME
+
     args = parse_args()
 
     prompt_configs = load_prompts(args.prompt_dir)
-    paragraphs = parse_numbered_paragraphs(read_text(args.input))
+    variant_dirs = get_variant_dirs(args.input_dir)
 
-    if len(paragraphs) < 2:
-        raise ValueError("The input text needs at least two paragraphs.")
-
-    print(f"Loaded paragraphs: {len(paragraphs)}")
     print(f"Loaded prompts: {len(prompt_configs)}")
+    print(f"Loaded variants: {len(variant_dirs)}")
     print(f"Provider/model: {args.provider}/{args.model}")
+    print(f"Batch mode: {args.batch_mode}")
     print(f"Batch size: {args.batch_size}")
+    print(f"Min/max batch words: {args.min_batch_words}/{args.max_batch_words}")
     print(f"Context size: {args.context_size}")
-    print(f"Ground truth: {args.ground_truth}")
+    print(f"Dynamic context: {args.dynamic_context}")
+    print(f"Min context words: {args.min_context_words}")
+    print(f"Max context paragraphs: {args.max_context_paragraphs}")
 
-    run_output_dir = args.output_dir / f"llm_{args.provider}_{slugify(args.model)}_batched"
-    summary_rows: list[dict[str, str | int | float]] = []
+    global_summary_rows: list[dict[str, str | int | float]] = []
+    if args.batch_mode == "words":
+        parameter_suffix = f"bw{args.min_batch_words}-{args.max_batch_words}_cw{args.min_context_words}"
+    else:
+        parameter_suffix = f"bs{args.batch_size}_cs{args.context_size}"
 
-    for prompt_config in prompt_configs:
-        print(f"\n=== Running prompt: {prompt_config.name} ===")
-        print(f"Prompt file: {prompt_config.path}")
+    for variant_dir in variant_dirs:
+        CURRENT_VARIANT_NAME = variant_dir.name
 
-        predicted_boundaries, batch_decisions = predict_boundaries_batched(
-            paragraphs=paragraphs,
-            prompt_config=prompt_config,
-            provider=args.provider,
-            model=args.model,
-            batch_size=args.batch_size,
-            context_size=args.context_size,
-            temperature=args.temperature,
-            ollama_url=args.ollama_url,
-            sleep_seconds=args.sleep,
-            use_cache=not args.no_cache,
+        input_file = variant_dir / "paragraphs_numbered.txt"
+        ground_truth_file = variant_dir / "g_grenzen_paragraph.txt"
+
+        print(f"\n=== Running variant: {variant_dir.name} ===")
+        print(f"Input: {input_file}")
+        print(f"Ground truth: {ground_truth_file}")
+
+        paragraphs = parse_numbered_paragraphs(read_text(input_file))
+
+        if len(paragraphs) < 2:
+            raise ValueError(
+                f"The input text needs at least two paragraphs: {input_file}"
+            )
+
+        print(f"Loaded paragraphs: {len(paragraphs)}")
+
+        run_output_dir = (
+            args.output_dir
+            / variant_dir.name
+            / f"llm_{args.provider}_{slugify(args.model)}_batched"
         )
-        parameter_suffix = f"bs{args.batch_size}_cs{args.context_size}"
+        variant_summary_rows: list[dict[str, str | int | float]] = []
 
-        prompt_output_dir = run_output_dir / prompt_config.name
+        for prompt_config in prompt_configs:
+            print(f"\n=== Running prompt: {prompt_config.name} ===")
+            print(f"Prompt file: {prompt_config.path}")
 
-        parameter_suffix = f"bs{args.batch_size}_cs{args.context_size}"
+            predicted_boundaries, batch_decisions = predict_boundaries_batched(
+                paragraphs=paragraphs,
+                prompt_config=prompt_config,
+                provider=args.provider,
+                model=args.model,
+                batch_size=args.batch_size,
+                batch_mode=args.batch_mode,
+                min_batch_words=args.min_batch_words,
+                max_batch_words=args.max_batch_words,
+                context_size=args.context_size,
+                dynamic_context=args.dynamic_context,
+                min_context_words=args.min_context_words,
+                max_context_paragraphs=args.max_context_paragraphs,
+                temperature=args.temperature,
+                ollama_url=args.ollama_url,
+                sleep_seconds=args.sleep,
+                use_cache=not args.no_cache,
+            )
 
-        boundary_output_file = (
+            prompt_output_dir = run_output_dir / prompt_config.name
+
+            boundary_output_file = (
                 prompt_output_dir
                 / f"predicted_boundaries_{prompt_config.name}_{parameter_suffix}.txt"
-        )
+            )
 
-        segment_output_file = (
+            segment_output_file = (
                 prompt_output_dir
                 / f"segmented_text_debug_{prompt_config.name}_{parameter_suffix}.txt"
-        )
+            )
 
-        batch_output_file = (
+            batch_output_file = (
                 prompt_output_dir
                 / f"batch_raw_outputs_{prompt_config.name}_{parameter_suffix}.csv"
-        )
+            )
 
-        evaluation_output_file = (
+            evaluation_output_file = (
                 prompt_output_dir
                 / f"evaluation_output_step4_{prompt_config.name}_{parameter_suffix}.txt"
-        )
+            )
 
-        write_boundary_list(predicted_boundaries, boundary_output_file)
-        write_segments(create_segments(paragraphs, predicted_boundaries), segment_output_file)
-        write_batch_outputs(batch_decisions, batch_output_file)
-        write_evaluation_report(
-            predicted_boundaries=predicted_boundaries,
-            ground_truth_file=args.ground_truth,
-            output_file=evaluation_output_file,
-            prompt_name=prompt_config.name,
-            boundary_output_file=boundary_output_file,
-        )
+            write_boundary_list(predicted_boundaries, boundary_output_file)
+            write_segments(create_segments(paragraphs, predicted_boundaries), segment_output_file)
+            write_batch_outputs(batch_decisions, batch_output_file)
+            write_evaluation_report(
+                predicted_boundaries=predicted_boundaries,
+                ground_truth_file=ground_truth_file,
+                output_file=evaluation_output_file,
+                prompt_name=prompt_config.name,
+                boundary_output_file=boundary_output_file,
+            )
 
-        print("\nBatched LLM segmentation completed.")
-        print(f"Prompt: {prompt_config.name}")
-        print(f"Number of predicted boundaries: {len(predicted_boundaries)}")
-        print(f"Boundary list saved to: {boundary_output_file}")
-        print(f"Evaluation report saved to: {evaluation_output_file}")
+            print("\nBatched LLM segmentation completed.")
+            print(f"Variant: {variant_dir.name}")
+            print(f"Prompt: {prompt_config.name}")
+            print(f"Number of predicted boundaries: {len(predicted_boundaries)}")
+            print(f"Boundary list saved to: {boundary_output_file}")
+            print(f"Evaluation report saved to: {evaluation_output_file}")
 
-        summary_rows.append(
-            {
+            summary_row = {
+                "variant": variant_dir.name,
                 "prompt_name": prompt_config.name,
                 "prompt_file": prompt_config.path.name,
                 "provider": args.provider,
                 "model": args.model,
+                "batch_mode": args.batch_mode,
                 "batch_size": args.batch_size,
+                "min_batch_words": args.min_batch_words,
+                "max_batch_words": args.max_batch_words,
                 "context_size": args.context_size,
+                "dynamic_context": str(args.dynamic_context),
+                "min_context_words": args.min_context_words,
+                "max_context_paragraphs": args.max_context_paragraphs,
                 "predicted_boundaries": len(predicted_boundaries),
                 "boundary_output_file": str(boundary_output_file.relative_to(args.output_dir)),
                 "segment_output_file": str(segment_output_file.relative_to(args.output_dir)),
                 "batch_output_file": str(batch_output_file.relative_to(args.output_dir)),
                 "evaluation_output_file": str(evaluation_output_file.relative_to(args.output_dir)),
             }
-        )
+            variant_summary_rows.append(summary_row)
+            global_summary_rows.append(summary_row)
 
-    summary_file = run_output_dir / "summary.csv"
-    write_summary(summary_rows, summary_file)
-    print(f"\nAll prompt runs completed. Summary saved to: {summary_file}")
+        summary_file = run_output_dir / "summary.csv"
+        write_summary(
+            [
+                {key: value for key, value in row.items() if key != "variant"}
+                for row in variant_summary_rows
+            ],
+            summary_file,
+        )
+        print(f"\nVariant completed. Summary saved to: {summary_file}")
+
+    global_summary_file = (
+        args.output_dir
+        / f"llm_{args.provider}_{slugify(args.model)}_batched_summary_all_variants.csv"
+    )
+    append_global_summary(global_summary_rows, global_summary_file)
+    print(f"\nAll variant runs completed. Global summary saved to: {global_summary_file}")
 
 
 if __name__ == "__main__":
