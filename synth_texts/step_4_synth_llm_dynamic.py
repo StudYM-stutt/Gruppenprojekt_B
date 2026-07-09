@@ -55,11 +55,11 @@ DEFAULT_BATCH_MODE = "words"          # "words" or "paragraphs"
 DEFAULT_BATCH_SIZE = 40
 
 # Only relevant when DEFAULT_BATCH_MODE = "words"
-DEFAULT_MIN_BATCH_WORDS = 650
-DEFAULT_MAX_BATCH_WORDS = 1100
+DEFAULT_MIN_BATCH_WORDS = 1000
+DEFAULT_MAX_BATCH_WORDS = 1800
 
 # Context handling
-DEFAULT_DYNAMIC_CONTEXT = True
+DEFAULT_DYNAMIC_CONTEXT = False
 
 # Only relevant when dynamic context is disabled
 DEFAULT_CONTEXT_SIZE = 3
@@ -68,44 +68,60 @@ DEFAULT_CONTEXT_SIZE = 3
 DEFAULT_MIN_CONTEXT_WORDS = 180
 DEFAULT_MAX_CONTEXT_PARAGRAPHS = 12
 
+# KISSKI / GWDG Academic Cloud SAIA uses an OpenAI-compatible API.
+# Set your key in the terminal with:
+#   export KISSKI_API_KEY="your_api_key_here"
+# The base URL must be the API root, not the full /chat/completions endpoint.
+DEFAULT_KISSKI_BASE_URL = os.getenv("KISSKI_BASE_URL", "https://chat-ai.academiccloud.de/v1")
+DEFAULT_KISSKI_API_KEY_ENV = "KISSKI_API_KEY"
+DEFAULT_KISSKI_MODEL = os.getenv("KISSKI_MODEL", "meta-llama-3.1-8b-instruct")
+
 
 USER_PROMPT_TEMPLATE = """
-Du bekommst einen Ausschnitt aus einem narrativen Text.
+You are given a portion of a narrative text.
 
-Die Textabschnitte sind nummeriert. Entscheide, bei welchen Abschnittsnummern
-innerhalb des zu prüfenden Batchs ein neues narratives Segment beginnt.
+The paragraphs are numbered. Determine at which paragraph numbers within the current batch a new narrative segment begins.
 
 Definition:
-Eine Segmentgrenze liegt bei der Abschnittsnummer, an der ein neues narratives
-Segment beginnt. Die Abschnittsnummer ist also der erste Absatz des neuen Segments.
+A segment boundary is the paragraph number at which a new narrative segment begins. The paragraph number therefore marks the first paragraph of the new segment.
 
-Regeln:
-- Gib nur Abschnittsnummern aus dem Bereich "Zu prüfender Batch" zurück.
-- Die Kontextabschnitte dienen nur zur Orientierung und dürfen nicht ausgegeben werden.
-- Abschnitt [0] bzw. der erste Abschnitt des gesamten Textes wird nie als Segmentgrenze ausgegeben.
-- Gib den letzten Absatz des Batchs nicht nur deshalb aus, weil der Batch endet.
-- Du kennst keinen Goldstandard und sollst selbst eine Vorhersage treffen.
+Rules:
+- Return only paragraph numbers from the current batch.
+- Context paragraphs are provided for orientation only and must never be returned.
+- Paragraph [0] (the first paragraph of the entire text) is never a segment boundary.
+- Do not return the final paragraph of a batch simply because the batch ends.
+- You do not know the gold standard and must make your own prediction.
 
-Ausgabeformat:
-- Antworte ausschließlich mit Zahlen.
-- Erste Zeile: Anzahl der vorhergesagten Segmentgrenzen in diesem Batch.
-- Danach: genau eine Abschnittsnummer pro Zeile.
-- Wenn der Batch keine neue Segmentgrenze enthält, antworte ausschließlich mit:
+Output Format:
+- Respond with numbers only.
+- First line: the total number of predicted segment boundaries in the current batch.
+- Then: exactly one paragraph number per line.
+- If the current batch contains no segment boundary, respond with:
+
 0
 
-Beispiel mit drei Grenzen:
-3
-8
-14
-19
+The paragraph numbers you return must always be within the currently allowed batch range.
 
-Vorheriger Kontext:
+Never return paragraph numbers from:
+- previous context
+- following context
+
+Previous Context:
 {left_context}
 
-Zu prüfender Batch:
+CURRENT ALLOWED BATCH RANGE:
+[{batch_start}] to [{batch_end}]
+
+Only paragraph numbers within this range are valid output.
+
+Any paragraph number outside this range is invalid and must not be returned.
+
+Before producing your final answer, verify that every returned paragraph number lies within the allowed batch range.
+
+Current Batch:
 {batch_paragraphs}
 
-Nachfolgender Kontext:
+Following Context:
 {right_context}
 """.strip()
 
@@ -390,6 +406,8 @@ def build_batch_prompt(
         left_context=format_context(left_context),
         batch_paragraphs=format_context(batch.paragraphs),
         right_context=format_context(right_context),
+        batch_start=batch.paragraphs[0].paragraph_id,
+        batch_end=batch.paragraphs[-1].paragraph_id,
     )
 
 
@@ -434,6 +452,45 @@ def call_openai(model: str, system_prompt: str, user_prompt: str, temperature: f
     return response.choices[0].message.content or ""
 
 
+def call_kisski(
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float,
+    kisski_base_url: str,
+    kisski_api_key_env: str,
+    max_tokens: int | None,
+) -> str:
+    """Call KISSKI/GWDG Academic Cloud SAIA via its OpenAI-compatible API."""
+    from openai import OpenAI
+
+    api_key = os.getenv(kisski_api_key_env)
+    if not api_key:
+        raise RuntimeError(
+            f"Missing KISSKI API key. Set it first, e.g.:\n"
+            f"  export {kisski_api_key_env}=\"your_api_key_here\""
+        )
+
+    client = OpenAI(
+        api_key=api_key,
+        base_url=kisski_base_url.rstrip('/'),
+    )
+
+    request_kwargs = {
+        "model": model,
+        "temperature": temperature,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+    }
+    if max_tokens is not None and max_tokens > 0:
+        request_kwargs["max_tokens"] = max_tokens
+
+    response = client.chat.completions.create(**request_kwargs)
+    return response.choices[0].message.content or ""
+
+
 def call_ollama(model: str, system_prompt: str, user_prompt: str, temperature: float, ollama_url: str) -> str:
     if requests is None:
         raise ImportError("Install requests first: pip install requests")
@@ -455,9 +512,29 @@ def call_ollama(model: str, system_prompt: str, user_prompt: str, temperature: f
     return response.json().get("message", {}).get("content", "")
 
 
-def call_llm(provider: str, model: str, system_prompt: str, user_prompt: str, temperature: float, ollama_url: str) -> str:
+def call_llm(
+    provider: str,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float,
+    ollama_url: str,
+    kisski_base_url: str,
+    kisski_api_key_env: str,
+    max_tokens: int | None,
+) -> str:
     if provider == "openai":
         return call_openai(model, system_prompt, user_prompt, temperature)
+    if provider == "kisski":
+        return call_kisski(
+            model=model,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            temperature=temperature,
+            kisski_base_url=kisski_base_url,
+            kisski_api_key_env=kisski_api_key_env,
+            max_tokens=max_tokens,
+        )
     if provider == "ollama":
         return call_ollama(model, system_prompt, user_prompt, temperature, ollama_url)
     if provider == "dryrun":
@@ -524,6 +601,9 @@ def predict_boundaries_batched(
     max_context_paragraphs: int,
     temperature: float,
     ollama_url: str,
+    kisski_base_url: str,
+    kisski_api_key_env: str,
+    max_tokens: int | None,
     sleep_seconds: float,
     use_cache: bool,
 ) -> tuple[set[int], list[BatchDecision]]:
@@ -563,6 +643,9 @@ def predict_boundaries_batched(
                 user_prompt=user_prompt,
                 temperature=temperature,
                 ollama_url=ollama_url,
+                kisski_base_url=kisski_base_url,
+                kisski_api_key_env=kisski_api_key_env,
+                max_tokens=max_tokens,
             )
             if use_cache:
                 save_cached_batch(provider, model, prompt_config, batch, user_prompt, raw_response)
@@ -836,8 +919,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
     parser.add_argument("--prompt-dir", type=Path, default=PROMPT_DIR)
-    parser.add_argument("--provider", choices=["openai", "ollama", "dryrun"], default="dryrun")
-    parser.add_argument("--model", default="gpt-4o-mini")
+    parser.add_argument("--provider", choices=["openai", "kisski", "ollama", "dryrun"], default="dryrun")
+    parser.add_argument("--model", default=None, help="Model name. Defaults to gpt-4o-mini for OpenAI and meta-llama-3.1-8b-instruct for KISSKI.")
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="Paragraphs per batch if --batch-mode paragraphs is used.")
     parser.add_argument("--batch-mode", choices=["paragraphs", "words"], default=DEFAULT_BATCH_MODE, help="Use fixed paragraph batches or dynamic word-count batches.")
     parser.add_argument("--min-batch-words", type=int, default=DEFAULT_MIN_BATCH_WORDS, help="Minimum words per dynamic batch if possible.")
@@ -847,7 +930,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-context-words", type=int, default=DEFAULT_MIN_CONTEXT_WORDS, help="Minimum words per side for dynamic context if possible.")
     parser.add_argument("--max-context-paragraphs", type=int, default=DEFAULT_MAX_CONTEXT_PARAGRAPHS, help="Safety limit for dynamic context paragraphs per side.")
     parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--max-tokens", type=int, default=128, help="Maximum output tokens for API calls. Use 0 to omit this parameter.")
     parser.add_argument("--ollama-url", default=os.getenv("OLLAMA_URL", "http://localhost:11434"))
+    parser.add_argument("--kisski-base-url", default=DEFAULT_KISSKI_BASE_URL)
+    parser.add_argument("--kisski-api-key-env", default=DEFAULT_KISSKI_API_KEY_ENV, help="Name of the environment variable that contains your KISSKI API key.")
     parser.add_argument("--sleep", type=float, default=0.0, help="Seconds to wait between API calls.")
     parser.add_argument("--no-cache", action="store_true")
     return parser.parse_args()
@@ -928,19 +1014,61 @@ def main() -> None:
 
     args = parse_args()
 
+    if args.model is None:
+        if args.provider == "kisski":
+            args.model = DEFAULT_KISSKI_MODEL
+        elif args.provider == "openai":
+            args.model = "gpt-4o-mini"
+        else:
+            args.model = "llama3.2:3b" if args.provider == "ollama" else "dryrun"
+
+    max_tokens = args.max_tokens if args.max_tokens and args.max_tokens > 0 else None
+
     prompt_configs = load_prompts(args.prompt_dir)
     variant_dirs = get_variant_dirs(args.input_dir)
+
+# ==========================================================
+# TEST MODE
+# ==========================================================
+# Für schnelle Experimente mit Batchgrößen.
+# Nur die ersten N Varianten werden verarbeitet.
+#
+#Aktivieren:
+#     TEST_MODE = True
+#
+# Deaktivieren:
+#     TEST_MODE = False
+#
+# Beispiel:
+#     TEST_VARIANT_LIMIT = 2
+# verarbeitet nur:
+#     variant_01
+#     variant_02
+# ==========================================================
+
+    TEST_MODE = True
+    TEST_VARIANT_LIMIT = 2
+
+    if TEST_MODE:
+        print("\n" + "=" * 60)
+        print(f"TEST MODE ACTIVE: Using first {TEST_VARIANT_LIMIT} variants only")
+        print("=" * 60)
+        variant_dirs = variant_dirs[:TEST_VARIANT_LIMIT]
 
     print(f"Loaded prompts: {len(prompt_configs)}")
     print(f"Loaded variants: {len(variant_dirs)}")
     print(f"Provider/model: {args.provider}/{args.model}")
-    print(f"Batch mode: {args.batch_mode}")
-    print(f"Batch size: {args.batch_size}")
-    print(f"Min/max batch words: {args.min_batch_words}/{args.max_batch_words}")
-    print(f"Context size: {args.context_size}")
-    print(f"Dynamic context: {args.dynamic_context}")
-    print(f"Min context words: {args.min_context_words}")
-    print(f"Max context paragraphs: {args.max_context_paragraphs}")
+    if args.provider == "kisski":
+        print(f"KISSKI base URL: {args.kisski_base_url}")
+        print(f"KISSKI API key env var: {args.kisski_api_key_env}")
+        print(f"Max tokens: {max_tokens if max_tokens is not None else 'not set'}")
+        print(f"Batch mode: {args.batch_mode}")
+        print(f"Batch size: {args.batch_size}")
+        print(f"Min/max batch words: {args.min_batch_words}/{args.max_batch_words}")
+        print(f"Context size: {args.context_size}")
+        print(f"Dynamic context: {args.dynamic_context}")
+        print(f"Min context words: {args.min_context_words}")
+        print(f"Max context paragraphs: {args.max_context_paragraphs}")
 
     global_summary_rows: list[dict[str, str | int | float]] = []
     if args.batch_mode == "words":
@@ -993,6 +1121,9 @@ def main() -> None:
                 max_context_paragraphs=args.max_context_paragraphs,
                 temperature=args.temperature,
                 ollama_url=args.ollama_url,
+                kisski_base_url=args.kisski_base_url,
+                kisski_api_key_env=args.kisski_api_key_env,
+                max_tokens=max_tokens,
                 sleep_seconds=args.sleep,
                 use_cache=not args.no_cache,
             )
