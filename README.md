@@ -56,7 +56,6 @@ Gruppenprojekt_B/
 │   ├── step_4_synth_llm_dynamic.py
 │   └── step_5_synth_visualisation_llm_grouped.py
 │
-├── step_1_combine_hood_crueso_granularity_clusters.py  # New: 4 granularity categories
 ├── README.md
 └── requirements.txt
 ```
