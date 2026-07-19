@@ -23,39 +23,49 @@ According to the project meeting, testing **5 variants** is sufficient (instead 
 ```
 Gruppenprojekt_B/
 │
-├── main_pipeline/              # Pipeline for real literary texts
-│   ├── step_1_input/           # Input: g_Standard.txt (full book text)
-│   ├── Grenzen/                # Gold standard: g_grenzen.txt (true chapter boundaries)
-│   ├── step_1_output/          # TextTiling segmentation output
-│   ├── step_2_output/          # Evaluation results (Precision, Recall, F1)
-│   ├── step_3_output/          # Distance visualizations
-│   ├── step_4_output/          # LLM segmentation output
-│   ├── step_5_output/          # LLM result visualizations
-│   ├── prompts/                # Prompt .txt files for LLM
-│   ├── prompt_outputs/         # LLM responses per prompt
-│   ├── llm_cache/              # Cache for LLM responses
-│   ├── llm_cache_step4/        # Cache for step 4 LLM calls
+├── evaluation/                  # Evaluation and visualization scripts
+│   ├── barplot_me_phm_phasevergleich_f1_ohne_baseline_plotframe.py
+│   ├── barplot_me_phm_phasevergleich_precision_recall_f1_angepasst.py
+│   ├── barplot_me_phm_precision_recall_f1_mit_legende.py
+│   ├── barplot_me_phm_prompt_f1.py
+│   ├── barplot_me_phm_prompt_f1_mit_legende.py
+│   ├── boxplot_synth_phase_1_2_fixed_050_scale.py
+│   └── boxplot_synth_phase_1_2_precision_recall_f1.py
+│
+├── main_pipeline/               # Pipeline for real literary texts
+│   ├── Grenzen/                 # Gold standard: g_grenzen.txt
+│   ├── llm_cache/               # Cache for LLM responses
+│   ├── llm_cache_step4/         # Cache for step 4 LLM calls
+│   ├── prompt_outputs/          # LLM responses per prompt
+│   ├── prompts/                 # Prompt .txt files for LLM
+│   ├── step_1_input/            # Input texts
+│   ├── step_1_output/           # TextTiling segmentation output
+│   ├── step_2_output/           # Evaluation results
+│   ├── step_3_output/           # Distance visualizations
+│   ├── step_4_output/           # LLM segmentation output
+│   ├── step_5_output/           # LLM result visualizations
 │   ├── step_1_texttiling.py
 │   ├── step_2_evaluation_batch_distance.py
 │   ├── step_3_visualization_distance.py
-│   ├── step_4_llm_dynamic_batches.py
-│   ├── step_5_visualisation_llm_grouped.py
-│   ├── texttiling_de.py        # German TextTiling implementation
-│   └── texttiling_eng.py       # English TextTiling implementation
+│   ├── step_4_llm_dynamic.py
+│   ├── step_5_visualisation_llm_grouped_dynamic_fixed.py
+│   ├── texttiling_de.py         # German TextTiling implementation
+│   └── texttiling_eng.py        # English TextTiling implementation
 │
-├── synth_texts/                # Pipeline for synthetic mixed texts
-│   ├── step_1_input/           # Input: robinHood.txt, RobinsonCrusoe.txt
-│   ├── step_1_output/          # Generated variants (variant_01/ … variant_20/)
-│   ├── step_4_output/          # LLM segmentation output
-│   ├── step_4_prompt_input/    # Prompts for synthetic text LLM
-│   ├── step_5_output/          # LLM result visualizations
-│   ├── llm_cache_step4/        # Cache for step 4 LLM calls
+├── synth_texts/                 # Pipeline for synthetic mixed texts
+│   ├── llm_cache_step4/         # Cache for step 4 LLM calls
+│   ├── step_1_input/            # Input texts
+│   ├── step_1_output/           # Generated synthetic variants
+│   ├── step_4_output/           # LLM segmentation output
+│   ├── step_4_prompt_input/     # Prompts for synthetic text LLM
+│   ├── step_5_output/           # LLM result visualizations
 │   ├── step_1_combine_hood_crueso.py
+│   ├── step_1_combine_hood_crueso_granularity_clusters.py
 │   ├── step_1_combine_hood_crueso_paragraph_minimal.py
-│   ├── step_4_synth_llm.py
 │   ├── step_4_synth_llm_dynamic.py
-│   └── step_5_synth_visualisation_llm_grouped.py
+│   └── step_5_synth_visualisation_llm_grouped_fixed.py
 │
+├── .gitignore
 ├── README.md
 └── requirements.txt
 ```
