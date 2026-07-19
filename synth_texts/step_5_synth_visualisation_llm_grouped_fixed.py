@@ -9,15 +9,15 @@ BASE_DIR = Path(__file__).resolve().parent
 
 # Directory containing the evaluation files from step_4_llm.py.
 # The search is recursive because step_4 writes files into nested folders like:
-# step_4_output/llm_ollama_qwen3_8b_batched/Prompt_01/evaluation_output_step4_Prompt_01_bs10_cs3.txt
+# step_4_output/variant_01/llm_ollama_qwen3_8b_batched/Prompt_01/evaluation_output_step4_Prompt_01_bs10_cs3.txt
 EVALUATION_INPUT_DIR = BASE_DIR / "step_4_output"
 
 # Directory for Step 5 visualization output files.
 VISUALIZATION_OUTPUT_DIR = BASE_DIR / "step_5_output"
 
-EVALUATION_FILE_PATTERN = "evaluation_output_step4_*_bs*_cs*.txt"
+EVALUATION_FILE_PATTERN = "evaluation_output_step4_*.txt"
 PARAMETER_PATTERN = re.compile(
-    r"evaluation_output_step4_(?P<prompt>.+)_bs(?P<batch_size>\d+)_cs(?P<context_size>\d+)\.txt$"
+    r"evaluation_output_step4_(?P<prompt>.+)_(?P<parameter>(?:bs\d+_cs\d+)|(?:bw\d+-\d+_cw\d+))\.txt$"
 )
 
 # Extract provider and model from run directories such as:
@@ -51,11 +51,11 @@ def slugify(value):
 
 
 def prompt_sort_key(prompt_name):
-    """Sort Prompt_01, Prompt_02, ... numerically if possible."""
-    match = re.search(r"(\d+)$", prompt_name)
+    """Sort prompts robustly, even when names mix numeric and descriptive forms."""
+    match = re.search(r"Prompt[_-]?(\d+)", prompt_name, flags=re.IGNORECASE)
     if match:
-        return int(match.group(1))
-    return prompt_name
+        return (0, int(match.group(1)), prompt_name.lower())
+    return (1, 0, prompt_name.lower())
 
 
 def get_evaluation_files():
@@ -70,17 +70,41 @@ def get_evaluation_files():
 
 
 def get_parameter_values(file_path):
-    """Extract prompt name, batch size and context size from a Step 4 evaluation file name."""
+    """Extract prompt and batching parameters from a Step 4 evaluation filename."""
     match = PARAMETER_PATTERN.match(file_path.name)
 
     if not match:
         raise ValueError(f"Invalid evaluation file name: {file_path.name}")
 
     prompt_name = match.group("prompt")
-    batch_size = int(match.group("batch_size"))
-    context_size = int(match.group("context_size"))
+    parameter = match.group("parameter")
 
-    return prompt_name, batch_size, context_size
+    if parameter.startswith("bs"):
+        return {
+            "prompt_name": prompt_name,
+            "parameter": parameter,
+            "batch_mode": "paragraphs",
+            "batch_size": int(re.search(r"bs(\d+)", parameter).group(1)),
+            "context_size": int(re.search(r"cs(\d+)", parameter).group(1)),
+            "min_batch_words": "",
+            "max_batch_words": "",
+            "min_context_words": "",
+        }
+
+    word_match = re.fullmatch(r"bw(\d+)-(\d+)_cw(\d+)", parameter)
+    if not word_match:
+        raise ValueError(f"Unsupported parameter suffix: {parameter}")
+
+    return {
+        "prompt_name": prompt_name,
+        "parameter": parameter,
+        "batch_mode": "words",
+        "batch_size": "",
+        "context_size": "",
+        "min_batch_words": int(word_match.group(1)),
+        "max_batch_words": int(word_match.group(2)),
+        "min_context_words": int(word_match.group(3)),
+    }
 
 
 def get_run_values(file_path):
@@ -91,6 +115,15 @@ def get_run_values(file_path):
             return match.group("provider"), match.group("model")
 
     return "unknown", "unknown"
+
+
+def get_variant(file_path):
+    """Extract the synthetic variant folder name, e.g. variant_01."""
+    for parent in file_path.parents:
+        if parent.name.startswith("variant_"):
+            return parent.name
+
+    return "unknown_variant"
 
 
 def parse_metric(text, metric_name):
@@ -130,8 +163,11 @@ def calculate_match_share(matches, ground_truth_boundaries):
 def parse_evaluation_file(file_path):
     """Parse one Step 4 evaluation file and return its metrics."""
     text = file_path.read_text(encoding="utf-8")
-    prompt_name, batch_size, context_size = get_parameter_values(file_path)
+    parameter_values = get_parameter_values(file_path)
+    prompt_name = parameter_values["prompt_name"]
+    parameter_suffix = parameter_values["parameter"]
     provider, model = get_run_values(file_path)
+    variant = get_variant(file_path)
 
     true_positives = parse_metric(text, "true_positives")
     false_positives = parse_metric(text, "false_positives")
@@ -150,18 +186,24 @@ def parse_evaluation_file(file_path):
         false_negatives,
     )
 
-    parameter = f"{model}_{prompt_name}_bs{batch_size}_cs{context_size}"
-    group_name = f"{model}_bs{batch_size}_cs{context_size}"
+    parameter = f"{model}_{prompt_name}_{parameter_suffix}"
+    group_name = f"{variant}_{model}_{parameter_suffix}"
 
     return {
         "source_file": str(file_path.relative_to(EVALUATION_INPUT_DIR)),
+        "variant": variant,
         "prompt_name": prompt_name,
         "provider": provider,
         "model": model,
         "parameter": parameter,
         "group_name": group_name,
-        "batch_size": batch_size,
-        "context_size": context_size,
+        "batch_mode": parameter_values["batch_mode"],
+        "batch_size": parameter_values["batch_size"],
+        "context_size": parameter_values["context_size"],
+        "min_batch_words": parameter_values["min_batch_words"],
+        "max_batch_words": parameter_values["max_batch_words"],
+        "min_context_words": parameter_values["min_context_words"],
+        "parameter_suffix": parameter_suffix,
         "ground_truth_boundaries": ground_truth_boundaries,
         "predicted_boundaries": parse_metric(text, "predicted_boundaries"),
         "true_positives": true_positives,
@@ -199,23 +241,23 @@ def load_evaluation_results():
     return sorted(
         results,
         key=lambda result: (
+            result["variant"],
             result["model"],
-            result["batch_size"],
-            result["context_size"],
+            result["parameter_suffix"],
             prompt_sort_key(result["prompt_name"]),
         ),
     )
 
 
 def group_results(results):
-    """Group results by identical model, batch size and context size."""
+    """Group results by identical variant, model, batch size and context size."""
     grouped_results = defaultdict(list)
 
     for result in results:
         group_key = (
+            result["variant"],
             result["model"],
-            result["batch_size"],
-            result["context_size"],
+            result["parameter_suffix"],
         )
         grouped_results[group_key].append(result)
 
@@ -223,9 +265,9 @@ def group_results(results):
 
 
 def make_group_output_dir(output_dir, group_key):
-    """Create one output subfolder per model + parameter setting."""
-    model, batch_size, context_size = group_key
-    group_dir = output_dir / f"{slugify(model)}_bs{batch_size}_cs{context_size}"
+    """Create one output subfolder per variant + model + parameter setting."""
+    variant, model, parameter_suffix = group_key
+    group_dir = output_dir / variant / f"{slugify(model)}_{slugify(parameter_suffix)}"
     group_dir.mkdir(parents=True, exist_ok=True)
     return group_dir
 
@@ -341,13 +383,19 @@ def write_results_table(results, output_path):
 
     fieldnames = [
         "source_file",
+        "variant",
         "prompt_name",
         "provider",
         "model",
         "parameter",
         "group_name",
+        "batch_mode",
         "batch_size",
         "context_size",
+        "min_batch_words",
+        "max_batch_words",
+        "min_context_words",
+        "parameter_suffix",
         "ground_truth_boundaries",
         "predicted_boundaries",
         "true_positives",
@@ -392,11 +440,11 @@ def write_grouped_outputs(grouped_results, output_dir):
     created_files = []
 
     for group_key, group in sorted(grouped_results.items()):
-        model, batch_size, context_size = group_key
+        variant, model, parameter_suffix = group_key
         group = sorted(group, key=lambda result: prompt_sort_key(result["prompt_name"]))
         group_dir = make_group_output_dir(output_dir, group_key)
-        title_prefix = f"{model} bs{batch_size} cs{context_size}"
-        file_prefix = f"{slugify(model)}_bs{batch_size}_cs{context_size}"
+        title_prefix = f"{variant} {model} {parameter_suffix}"
+        file_prefix = f"{slugify(variant)}_{slugify(model)}_{slugify(parameter_suffix)}"
 
         metric_plot_file = group_dir / f"{file_prefix}_precision_recall_f1_plot.png"
         distance_plot_file = group_dir / f"{file_prefix}_distance_matches_plot.png"
@@ -427,9 +475,9 @@ def print_summary(results, grouped_results, created_files, full_table_file):
     print()
 
     for group_key, group in sorted(grouped_results.items()):
-        model, batch_size, context_size = group_key
+        variant, model, parameter_suffix = group_key
         print(
-            f"Group {model}_bs{batch_size}_cs{context_size}: "
+            f"Group {variant}_{model}_{parameter_suffix}: "
             f"{len(group)} prompt file(s)"
         )
 

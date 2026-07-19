@@ -9,16 +9,32 @@ BASE_DIR = Path(__file__).resolve().parent
 
 # Directory containing the evaluation files from step_4_llm.py.
 # The search is recursive because step_4 writes files into nested folders like:
-# step_4_output/variant_01/llm_ollama_qwen3_8b_batched/Prompt_01/evaluation_output_step4_Prompt_01_bs10_cs3.txt
+# step_4_output/llm_ollama_qwen3_8b_batched/Prompt_01/evaluation_output_step4_Prompt_01_bs10_cs3.txt
 EVALUATION_INPUT_DIR = BASE_DIR / "step_4_output"
 
 # Directory for Step 5 visualization output files.
 VISUALIZATION_OUTPUT_DIR = BASE_DIR / "step_5_output"
 
-EVALUATION_FILE_PATTERN = "evaluation_output_step4_*_bs*_cs*.txt"
-PARAMETER_PATTERN = re.compile(
-    r"evaluation_output_step4_(?P<prompt>.+)_bs(?P<batch_size>\d+)_cs(?P<context_size>\d+)\.txt$"
+EVALUATION_FILE_PATTERN = "evaluation_output_step4_*.txt"
+
+# Supported Step 4 filename formats:
+# 1) word-based dynamic batching:
+#    evaluation_output_step4_<prompt>_bw1000-1800_cw200_dctx1.txt
+# 2) paragraph-based batching:
+#    evaluation_output_step4_<prompt>_bs40_cs3.txt
+WORD_PARAMETER_PATTERN = re.compile(
+    r"evaluation_output_step4_(?P<prompt>.+)_"
+    r"bw(?P<min_batch_words>\d+)-(?P<max_batch_words>\d+)_"
+    r"cw(?P<min_context_words>\d+)_"
+    r"dctx(?P<dynamic_context>[01])\.txt$"
 )
+
+PARAGRAPH_PARAMETER_PATTERN = re.compile(
+    r"evaluation_output_step4_(?P<prompt>.+)_"
+    r"bs(?P<batch_size>\d+)_"
+    r"cs(?P<context_size>\d+)\.txt$"
+)
+
 
 # Extract provider and model from run directories such as:
 # llm_dryrun_gpt-4o-mini_batched
@@ -59,29 +75,60 @@ def prompt_sort_key(prompt_name):
 
 
 def get_evaluation_files():
-    """Return all matching Step 4 evaluation files recursively."""
+    """Return all supported Step 4 evaluation files recursively."""
     files = sorted(EVALUATION_INPUT_DIR.rglob(EVALUATION_FILE_PATTERN))
-
     return [
         file_path
         for file_path in files
-        if PARAMETER_PATTERN.match(file_path.name)
+        if (
+            WORD_PARAMETER_PATTERN.match(file_path.name)
+            or PARAGRAPH_PARAMETER_PATTERN.match(file_path.name)
+        )
     ]
 
 
 def get_parameter_values(file_path):
-    """Extract prompt name, batch size and context size from a Step 4 evaluation file name."""
-    match = PARAMETER_PATTERN.match(file_path.name)
+    """Extract prompt and batching/context parameters from a Step 4 filename."""
+    word_match = WORD_PARAMETER_PATTERN.match(file_path.name)
+    if word_match:
+        dynamic_context = bool(int(word_match.group("dynamic_context")))
+        min_context_words = int(word_match.group("min_context_words"))
+        min_batch_words = int(word_match.group("min_batch_words"))
+        max_batch_words = int(word_match.group("max_batch_words"))
 
-    if not match:
-        raise ValueError(f"Invalid evaluation file name: {file_path.name}")
+        return {
+            "prompt_name": word_match.group("prompt"),
+            "batch_mode": "words",
+            "batch_size": None,
+            "context_size": None,
+            "min_batch_words": min_batch_words,
+            "max_batch_words": max_batch_words,
+            "min_context_words": min_context_words,
+            "dynamic_context": dynamic_context,
+            "parameter_suffix": (
+                f"bw{min_batch_words}-{max_batch_words}_"
+                f"cw{min_context_words}_dctx{int(dynamic_context)}"
+            ),
+        }
 
-    prompt_name = match.group("prompt")
-    batch_size = int(match.group("batch_size"))
-    context_size = int(match.group("context_size"))
+    paragraph_match = PARAGRAPH_PARAMETER_PATTERN.match(file_path.name)
+    if paragraph_match:
+        batch_size = int(paragraph_match.group("batch_size"))
+        context_size = int(paragraph_match.group("context_size"))
 
-    return prompt_name, batch_size, context_size
+        return {
+            "prompt_name": paragraph_match.group("prompt"),
+            "batch_mode": "paragraphs",
+            "batch_size": batch_size,
+            "context_size": context_size,
+            "min_batch_words": None,
+            "max_batch_words": None,
+            "min_context_words": None,
+            "dynamic_context": False,
+            "parameter_suffix": f"bs{batch_size}_cs{context_size}",
+        }
 
+    raise ValueError(f"Unsupported evaluation filename: {file_path.name}")
 
 def get_run_values(file_path):
     """Extract provider/model from the run directory if possible."""
@@ -91,15 +138,6 @@ def get_run_values(file_path):
             return match.group("provider"), match.group("model")
 
     return "unknown", "unknown"
-
-
-def get_variant(file_path):
-    """Extract the synthetic variant folder name, e.g. variant_01."""
-    for parent in file_path.parents:
-        if parent.name.startswith("variant_"):
-            return parent.name
-
-    return "unknown_variant"
 
 
 def parse_metric(text, metric_name):
@@ -138,21 +176,21 @@ def calculate_match_share(matches, ground_truth_boundaries):
 
 def parse_evaluation_file(file_path):
     """Parse one Step 4 evaluation file and return its metrics."""
-    text = file_path.read_text(encoding="utf-8")
-    prompt_name, batch_size, context_size = get_parameter_values(file_path)
+    report_text = file_path.read_text(encoding="utf-8")
+    parameters = get_parameter_values(file_path)
+    prompt_name = parameters["prompt_name"]
     provider, model = get_run_values(file_path)
-    variant = get_variant(file_path)
 
-    true_positives = parse_metric(text, "true_positives")
-    false_positives = parse_metric(text, "false_positives")
-    false_negatives = parse_metric(text, "false_negatives")
-    ground_truth_boundaries = parse_metric(text, "ground_truth_boundaries")
+    true_positives = parse_metric(report_text, "true_positives")
+    false_positives = parse_metric(report_text, "false_positives")
+    false_negatives = parse_metric(report_text, "false_negatives")
+    ground_truth_boundaries = parse_metric(report_text, "ground_truth_boundaries")
 
-    exact_matches = parse_metric(text, "exact_matches")
-    matches_within_1 = parse_metric(text, "matches_within_1")
-    matches_within_2 = parse_metric(text, "matches_within_2")
-    matches_within_3 = parse_metric(text, "matches_within_3")
-    matches_within_5 = parse_metric(text, "matches_within_5")
+    exact_matches = parse_metric(report_text, "exact_matches")
+    matches_within_1 = parse_metric(report_text, "matches_within_1")
+    matches_within_2 = parse_metric(report_text, "matches_within_2")
+    matches_within_3 = parse_metric(report_text, "matches_within_3")
+    matches_within_5 = parse_metric(report_text, "matches_within_5")
 
     jaccard_index = calculate_jaccard_index(
         true_positives,
@@ -160,27 +198,33 @@ def parse_evaluation_file(file_path):
         false_negatives,
     )
 
-    parameter = f"{model}_{prompt_name}_bs{batch_size}_cs{context_size}"
-    group_name = f"{variant}_{model}_bs{batch_size}_cs{context_size}"
+    parameter_suffix = parameters["parameter_suffix"]
+    parameter = f"{model}_{prompt_name}_{parameter_suffix}"
+    group_name = f"{model}_{parameter_suffix}"
 
     return {
         "source_file": str(file_path.relative_to(EVALUATION_INPUT_DIR)),
-        "variant": variant,
         "prompt_name": prompt_name,
         "provider": provider,
         "model": model,
         "parameter": parameter,
         "group_name": group_name,
-        "batch_size": batch_size,
-        "context_size": context_size,
+        "batch_mode": parameters["batch_mode"],
+        "batch_size": parameters["batch_size"],
+        "context_size": parameters["context_size"],
+        "min_batch_words": parameters["min_batch_words"],
+        "max_batch_words": parameters["max_batch_words"],
+        "min_context_words": parameters["min_context_words"],
+        "dynamic_context": parameters["dynamic_context"],
+        "parameter_suffix": parameter_suffix,
         "ground_truth_boundaries": ground_truth_boundaries,
-        "predicted_boundaries": parse_metric(text, "predicted_boundaries"),
+        "predicted_boundaries": parse_metric(report_text, "predicted_boundaries"),
         "true_positives": true_positives,
         "false_positives": false_positives,
         "false_negatives": false_negatives,
-        "precision": parse_metric(text, "precision"),
-        "recall": parse_metric(text, "recall"),
-        "f1_score": parse_metric(text, "f1_score"),
+        "precision": parse_metric(report_text, "precision"),
+        "recall": parse_metric(report_text, "recall"),
+        "f1_score": parse_metric(report_text, "f1_score"),
         "jaccard_index": jaccard_index,
         "exact_matches": exact_matches,
         "matches_within_1": matches_within_1,
@@ -194,15 +238,16 @@ def parse_evaluation_file(file_path):
         "within_5_share": calculate_match_share(matches_within_5, ground_truth_boundaries),
     }
 
-
 def load_evaluation_results():
-    """Load all Step 4 evaluation results."""
+    """Load all supported Step 4 evaluation results."""
     evaluation_files = get_evaluation_files()
 
     if not evaluation_files:
         raise FileNotFoundError(
             f"No matching Step 4 evaluation files were found in: {EVALUATION_INPUT_DIR}\n"
-            f"Expected pattern: {EVALUATION_FILE_PATTERN}"
+            "Supported filename formats:\n"
+            "  evaluation_output_step4_<prompt>_bw1000-1800_cw200_dctx1.txt\n"
+            "  evaluation_output_step4_<prompt>_bs40_cs3.txt"
         )
 
     results = [parse_evaluation_file(file_path) for file_path in evaluation_files]
@@ -210,25 +255,23 @@ def load_evaluation_results():
     return sorted(
         results,
         key=lambda result: (
-            result["variant"],
             result["model"],
-            result["batch_size"],
-            result["context_size"],
+            result["batch_mode"],
+            result["parameter_suffix"],
             prompt_sort_key(result["prompt_name"]),
         ),
     )
 
 
 def group_results(results):
-    """Group results by identical variant, model, batch size and context size."""
+    """Group results by model and identical Step 4 parameter settings."""
     grouped_results = defaultdict(list)
 
     for result in results:
         group_key = (
-            result["variant"],
             result["model"],
-            result["batch_size"],
-            result["context_size"],
+            result["batch_mode"],
+            result["parameter_suffix"],
         )
         grouped_results[group_key].append(result)
 
@@ -236,12 +279,19 @@ def group_results(results):
 
 
 def make_group_output_dir(output_dir, group_key):
-    """Create one output subfolder per variant + model + parameter setting."""
-    variant, model, batch_size, context_size = group_key
-    group_dir = output_dir / variant / f"{slugify(model)}_bs{batch_size}_cs{context_size}"
+    """Create one output subfolder per model and parameter setting."""
+    model, _batch_mode, parameter_suffix = group_key
+    group_dir = output_dir / f"{slugify(model)}_{slugify(parameter_suffix)}"
     group_dir.mkdir(parents=True, exist_ok=True)
     return group_dir
 
+
+def describe_group(group_key):
+    """Return display title and safe filename prefix for one group."""
+    model, batch_mode, parameter_suffix = group_key
+    title_prefix = f"{model} {parameter_suffix} ({batch_mode})"
+    file_prefix = f"{slugify(model)}_{slugify(parameter_suffix)}"
+    return title_prefix, file_prefix
 
 def create_metric_plot(results, output_path, title_prefix):
     """Create a grouped plot for precision, recall and F1 score."""
@@ -354,14 +404,19 @@ def write_results_table(results, output_path):
 
     fieldnames = [
         "source_file",
-        "variant",
         "prompt_name",
         "provider",
         "model",
         "parameter",
         "group_name",
+        "batch_mode",
         "batch_size",
         "context_size",
+        "min_batch_words",
+        "max_batch_words",
+        "min_context_words",
+        "dynamic_context",
+        "parameter_suffix",
         "ground_truth_boundaries",
         "predicted_boundaries",
         "true_positives",
@@ -402,15 +457,13 @@ def write_results_table(results, output_path):
 
 
 def write_grouped_outputs(grouped_results, output_dir):
-    """Write plots and tables for every model + bs/cs group."""
+    """Write plots and tables for every model/parameter group."""
     created_files = []
 
     for group_key, group in sorted(grouped_results.items()):
-        variant, model, batch_size, context_size = group_key
         group = sorted(group, key=lambda result: prompt_sort_key(result["prompt_name"]))
         group_dir = make_group_output_dir(output_dir, group_key)
-        title_prefix = f"{variant} {model} bs{batch_size} cs{context_size}"
-        file_prefix = f"{slugify(variant)}_{slugify(model)}_bs{batch_size}_cs{context_size}"
+        title_prefix, file_prefix = describe_group(group_key)
 
         metric_plot_file = group_dir / f"{file_prefix}_precision_recall_f1_plot.png"
         distance_plot_file = group_dir / f"{file_prefix}_distance_matches_plot.png"
@@ -441,16 +494,15 @@ def print_summary(results, grouped_results, created_files, full_table_file):
     print()
 
     for group_key, group in sorted(grouped_results.items()):
-        variant, model, batch_size, context_size = group_key
+        model, batch_mode, parameter_suffix = group_key
         print(
-            f"Group {variant}_{model}_bs{batch_size}_cs{context_size}: "
+            f"Group {model}_{parameter_suffix} ({batch_mode}): "
             f"{len(group)} prompt file(s)"
         )
 
     print("\nCreated output files:")
     for file_path in created_files:
         print(file_path)
-
 
 def main():
     """Create grouped visualizations for all Step 4 evaluation files."""

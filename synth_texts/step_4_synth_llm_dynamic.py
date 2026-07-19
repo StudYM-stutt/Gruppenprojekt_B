@@ -20,6 +20,7 @@ import hashlib
 import os
 import re
 import time
+import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -59,7 +60,7 @@ DEFAULT_MIN_BATCH_WORDS = 1000
 DEFAULT_MAX_BATCH_WORDS = 1800
 
 # Context handling
-DEFAULT_DYNAMIC_CONTEXT = False
+DEFAULT_DYNAMIC_CONTEXT = True
 
 # Only relevant when dynamic context is disabled
 DEFAULT_CONTEXT_SIZE = 3
@@ -75,6 +76,12 @@ DEFAULT_MAX_CONTEXT_PARAGRAPHS = 12
 DEFAULT_KISSKI_BASE_URL = os.getenv("KISSKI_BASE_URL", "https://chat-ai.academiccloud.de/v1")
 DEFAULT_KISSKI_API_KEY_ENV = "KISSKI_API_KEY"
 DEFAULT_KISSKI_MODEL = os.getenv("KISSKI_MODEL", "meta-llama-3.1-8b-instruct")
+
+# Retry handling for temporary API problems such as rate limits (429)
+# and internal server errors (500/502/503/504).
+DEFAULT_MAX_RETRIES = 8
+DEFAULT_RETRY_SLEEP = 60
+DEFAULT_MAX_RETRY_SLEEP = 300
 
 
 USER_PROMPT_TEMPLATE = """
@@ -437,17 +444,81 @@ def save_cached_batch(provider: str, model: str, prompt_config: PromptConfig, ba
     path.write_text(raw_response, encoding="utf-8")
 
 
-def call_openai(model: str, system_prompt: str, user_prompt: str, temperature: float) -> str:
+
+def is_retryable_api_error(error: Exception) -> bool:
+    """Return True for temporary API errors that should be retried."""
+    status_code = getattr(error, "status_code", None)
+    if status_code in {429, 500, 502, 503, 504}:
+        return True
+
+    error_name = error.__class__.__name__
+    return error_name in {
+        "RateLimitError",
+        "InternalServerError",
+        "APITimeoutError",
+        "APIConnectionError",
+    }
+
+
+def call_with_retries(
+    request_function,
+    max_retries: int,
+    retry_sleep: float,
+    max_retry_sleep: float,
+) -> object:
+    """
+    Execute an API request with retry/backoff for temporary errors.
+
+    This prevents long experiment runs from stopping immediately when the
+    provider returns a temporary 429 rate-limit error or 5xx server error.
+    """
+    if max_retries < 0:
+        raise ValueError("max_retries must be 0 or greater.")
+
+    attempt = 0
+    while True:
+        try:
+            return request_function()
+        except Exception as error:
+            attempt += 1
+            if attempt > max_retries or not is_retryable_api_error(error):
+                raise
+
+            status_code = getattr(error, "status_code", "unknown")
+            wait_seconds = min(max_retry_sleep, retry_sleep * (2 ** (attempt - 1)))
+            # Add small jitter so repeated calls do not retry at exactly the same moment.
+            wait_seconds = wait_seconds + random.uniform(0, min(5.0, wait_seconds * 0.1))
+
+            print(
+                f"  API temporary error ({error.__class__.__name__}, status={status_code}). "
+                f"Retry {attempt}/{max_retries} after {wait_seconds:.1f}s ..."
+            )
+            time.sleep(wait_seconds)
+
+def call_openai(
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float,
+    max_retries: int,
+    retry_sleep: float,
+    max_retry_sleep: float,
+) -> str:
     from openai import OpenAI
 
     client = OpenAI()
-    response = client.chat.completions.create(
-        model=model,
-        temperature=temperature,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
+    response = call_with_retries(
+        lambda: client.chat.completions.create(
+            model=model,
+            temperature=temperature,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        ),
+        max_retries=max_retries,
+        retry_sleep=retry_sleep,
+        max_retry_sleep=max_retry_sleep,
     )
     return response.choices[0].message.content or ""
 
@@ -460,6 +531,9 @@ def call_kisski(
     kisski_base_url: str,
     kisski_api_key_env: str,
     max_tokens: int | None,
+    max_retries: int,
+    retry_sleep: float,
+    max_retry_sleep: float,
 ) -> str:
     """Call KISSKI/GWDG Academic Cloud SAIA via its OpenAI-compatible API."""
     from openai import OpenAI
@@ -487,7 +561,12 @@ def call_kisski(
     if max_tokens is not None and max_tokens > 0:
         request_kwargs["max_tokens"] = max_tokens
 
-    response = client.chat.completions.create(**request_kwargs)
+    response = call_with_retries(
+        lambda: client.chat.completions.create(**request_kwargs),
+        max_retries=max_retries,
+        retry_sleep=retry_sleep,
+        max_retry_sleep=max_retry_sleep,
+    )
     return response.choices[0].message.content or ""
 
 
@@ -522,9 +601,20 @@ def call_llm(
     kisski_base_url: str,
     kisski_api_key_env: str,
     max_tokens: int | None,
+    max_retries: int,
+    retry_sleep: float,
+    max_retry_sleep: float,
 ) -> str:
     if provider == "openai":
-        return call_openai(model, system_prompt, user_prompt, temperature)
+        return call_openai(
+            model=model,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            temperature=temperature,
+            max_retries=max_retries,
+            retry_sleep=retry_sleep,
+            max_retry_sleep=max_retry_sleep,
+        )
     if provider == "kisski":
         return call_kisski(
             model=model,
@@ -534,6 +624,9 @@ def call_llm(
             kisski_base_url=kisski_base_url,
             kisski_api_key_env=kisski_api_key_env,
             max_tokens=max_tokens,
+            max_retries=max_retries,
+            retry_sleep=retry_sleep,
+            max_retry_sleep=max_retry_sleep,
         )
     if provider == "ollama":
         return call_ollama(model, system_prompt, user_prompt, temperature, ollama_url)
@@ -605,6 +698,9 @@ def predict_boundaries_batched(
     kisski_api_key_env: str,
     max_tokens: int | None,
     sleep_seconds: float,
+    max_retries: int,
+    retry_sleep: float,
+    max_retry_sleep: float,
     use_cache: bool,
 ) -> tuple[set[int], list[BatchDecision]]:
     batches = create_batches(
@@ -646,6 +742,9 @@ def predict_boundaries_batched(
                 kisski_base_url=kisski_base_url,
                 kisski_api_key_env=kisski_api_key_env,
                 max_tokens=max_tokens,
+                max_retries=max_retries,
+                retry_sleep=retry_sleep,
+                max_retry_sleep=max_retry_sleep,
             )
             if use_cache:
                 save_cached_batch(provider, model, prompt_config, batch, user_prompt, raw_response)
@@ -934,7 +1033,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ollama-url", default=os.getenv("OLLAMA_URL", "http://localhost:11434"))
     parser.add_argument("--kisski-base-url", default=DEFAULT_KISSKI_BASE_URL)
     parser.add_argument("--kisski-api-key-env", default=DEFAULT_KISSKI_API_KEY_ENV, help="Name of the environment variable that contains your KISSKI API key.")
-    parser.add_argument("--sleep", type=float, default=0.0, help="Seconds to wait between API calls.")
+    parser.add_argument("--sleep", type=float, default=0.0, help="Seconds to wait between successful API calls.")
+    parser.add_argument("--max-retries", type=int, default=DEFAULT_MAX_RETRIES, help="Maximum retries for temporary API errors such as 429 or 500.")
+    parser.add_argument("--retry-sleep", type=float, default=DEFAULT_RETRY_SLEEP, help="Initial seconds to wait after a retryable API error.")
+    parser.add_argument("--max-retry-sleep", type=float, default=DEFAULT_MAX_RETRY_SLEEP, help="Maximum seconds to wait between retry attempts.")
     parser.add_argument("--no-cache", action="store_true")
     return parser.parse_args()
 
@@ -1046,8 +1148,8 @@ def main() -> None:
 #     variant_02
 # ==========================================================
 
-    TEST_MODE = True
-    TEST_VARIANT_LIMIT = 2
+    TEST_MODE = False
+    TEST_VARIANT_LIMIT = 5
 
     if TEST_MODE:
         print("\n" + "=" * 60)
@@ -1069,6 +1171,9 @@ def main() -> None:
         print(f"Dynamic context: {args.dynamic_context}")
         print(f"Min context words: {args.min_context_words}")
         print(f"Max context paragraphs: {args.max_context_paragraphs}")
+        print(f"Max retries: {args.max_retries}")
+        print(f"Retry sleep: {args.retry_sleep}")
+        print(f"Max retry sleep: {args.max_retry_sleep}")
 
     global_summary_rows: list[dict[str, str | int | float]] = []
     if args.batch_mode == "words":
@@ -1125,6 +1230,9 @@ def main() -> None:
                 kisski_api_key_env=args.kisski_api_key_env,
                 max_tokens=max_tokens,
                 sleep_seconds=args.sleep,
+                max_retries=args.max_retries,
+                retry_sleep=args.retry_sleep,
+                max_retry_sleep=args.max_retry_sleep,
                 use_cache=not args.no_cache,
             )
 
