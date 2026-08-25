@@ -14,11 +14,11 @@ The 20 variants are divided into 4 experimental granularity clusters:
   Cluster 4 | variant_16-variant_20 | very fine mixing   | very short source blocks
 
 Each variant is deliberately shortened with TARGET_WORDS and MAX_PARAGRAPHS,
-so Step 4 creates fewer LLM batches and is less likely to hit token limits.
+so Step 2 creates fewer LLM batches and is less likely to hit token limits.
 
 Output per variant
 ------------------
-  paragraphs_numbered.txt      required by Step 4, [N] paragraph format
+  paragraphs_numbered.txt      required by Step 2, [N] paragraph format
   g_grenzen_paragraph.txt      gold boundaries where source changes
   source_map.tsv               debugging/evaluation helper
   variant_metadata.txt         cluster settings and summary
@@ -54,7 +54,7 @@ N_VARIANTS = 20
 MIN_PARAGRAPH_CHARS = 150
 
 # Makes the synthetic texts much shorter than full novels.
-# Adjust these two values if Step 4 is still too slow.
+# Adjust these two values if Step 2 is still too slow.
 TARGET_WORDS = 30_000
 MAX_PARAGRAPHS = 500
 MIN_PARAGRAPHS = 45
@@ -260,7 +260,7 @@ def write_variant(
     cluster: ClusterConfig,
     seed: int,
 ) -> None:
-    """Writes Step 4 files plus transparent metadata/debug files."""
+    """Writes Step 2 files plus transparent metadata/debug files."""
     out_dir.mkdir(parents=True, exist_ok=True)
 
     (out_dir / "paragraphs_numbered.txt").write_text(

@@ -7,17 +7,17 @@ import matplotlib.pyplot as plt
 
 BASE_DIR = Path(__file__).resolve().parent
 
-# Directory containing the evaluation files from step_4_llm.py.
-# The search is recursive because step_4 writes files into nested folders like:
-# step_4_output/variant_01/llm_ollama_qwen3_8b_batched/Prompt_01/evaluation_output_step4_Prompt_01_bs10_cs3.txt
-EVALUATION_INPUT_DIR = BASE_DIR / "step_4_output"
+# Directory containing the evaluation files from step_2_llm.py.
+# The search is recursive because step_2 writes files into nested folders like:
+# step_2_output/variant_01/llm_ollama_qwen3_8b_batched/Prompt_01/evaluation_output_step2_Prompt_01_bs10_cs3.txt
+EVALUATION_INPUT_DIR = BASE_DIR / "step_2_output"
 
-# Directory for Step 5 visualization output files.
-VISUALIZATION_OUTPUT_DIR = BASE_DIR / "step_5_output"
+# Directory for Step 3 visualization output files.
+VISUALIZATION_OUTPUT_DIR = BASE_DIR / "step_3_output"
 
-EVALUATION_FILE_PATTERN = "evaluation_output_step4_*.txt"
+EVALUATION_FILE_PATTERN = "evaluation_output_step2_*.txt"
 PARAMETER_PATTERN = re.compile(
-    r"evaluation_output_step4_(?P<prompt>.+)_(?P<parameter>(?:bs\d+_cs\d+)|(?:bw\d+-\d+_cw\d+))\.txt$"
+    r"evaluation_output_step2_(?P<prompt>.+)_(?P<parameter>(?:bs\d+_cs\d+)|(?:bw\d+-\d+_cw\d+))\.txt$"
 )
 
 # Extract provider and model from run directories such as:
@@ -59,7 +59,7 @@ def prompt_sort_key(prompt_name):
 
 
 def get_evaluation_files():
-    """Return all matching Step 4 evaluation files recursively."""
+    """Return all matching Step 2 evaluation files recursively."""
     files = sorted(EVALUATION_INPUT_DIR.rglob(EVALUATION_FILE_PATTERN))
 
     return [
@@ -70,7 +70,7 @@ def get_evaluation_files():
 
 
 def get_parameter_values(file_path):
-    """Extract prompt and batching parameters from a Step 4 evaluation filename."""
+    """Extract prompt and batching parameters from a Step 2 evaluation filename."""
     match = PARAMETER_PATTERN.match(file_path.name)
 
     if not match:
@@ -161,7 +161,7 @@ def calculate_match_share(matches, ground_truth_boundaries):
 
 
 def parse_evaluation_file(file_path):
-    """Parse one Step 4 evaluation file and return its metrics."""
+    """Parse one Step 2 evaluation file and return its metrics."""
     text = file_path.read_text(encoding="utf-8")
     parameter_values = get_parameter_values(file_path)
     prompt_name = parameter_values["prompt_name"]
@@ -227,12 +227,12 @@ def parse_evaluation_file(file_path):
 
 
 def load_evaluation_results():
-    """Load all Step 4 evaluation results."""
+    """Load all Step 2 evaluation results."""
     evaluation_files = get_evaluation_files()
 
     if not evaluation_files:
         raise FileNotFoundError(
-            f"No matching Step 4 evaluation files were found in: {EVALUATION_INPUT_DIR}\n"
+            f"No matching Step 2 evaluation files were found in: {EVALUATION_INPUT_DIR}\n"
             f"Expected pattern: {EVALUATION_FILE_PATTERN}"
         )
 
@@ -468,7 +468,7 @@ def write_grouped_outputs(grouped_results, output_dir):
 
 def print_summary(results, grouped_results, created_files, full_table_file):
     """Print a short summary for the generated files."""
-    print("Step 5 visualization completed.")
+    print("Step 3 visualization completed.")
     print(f"Processed evaluation files: {len(results)}")
     print(f"Created model/parameter groups: {len(grouped_results)}")
     print(f"Complete result table saved to: {full_table_file}")
@@ -487,14 +487,14 @@ def print_summary(results, grouped_results, created_files, full_table_file):
 
 
 def main():
-    """Create grouped visualizations for all Step 4 evaluation files."""
+    """Create grouped visualizations for all Step 2 evaluation files."""
     results = load_evaluation_results()
     grouped_results = group_results(results)
 
     output_dir = Path(VISUALIZATION_OUTPUT_DIR)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    full_table_file = output_dir / "step5_all_evaluation_results_table.csv"
+    full_table_file = output_dir / "step2_all_evaluation_results_table.csv"
     write_results_table(results, full_table_file)
 
     created_files = write_grouped_outputs(grouped_results, output_dir)

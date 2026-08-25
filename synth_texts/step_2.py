@@ -1,5 +1,5 @@
 """
-Step 4: LLM-based narrative segmentation.
+Step 2: LLM-based narrative segmentation.
 
 Goal:
 - Read the numbered project text.
@@ -9,7 +9,7 @@ Goal:
   first line  = total number of predicted boundaries
   next lines  = paragraph IDs where a new segment begins
 
-This script writes the Step 4 prediction files and additionally creates one evaluation_output_step4.txt per prompt.
+This script writes the Step 2 prediction files and additionally creates one evaluation_output_step2.txt per prompt.
 """
 
 from __future__ import annotations
@@ -34,9 +34,9 @@ except ImportError:  # only needed for Ollama
 BASE_DIR = Path(__file__).resolve().parent
 
 STEP1_OUTPUT_DIR = BASE_DIR / "step_1_output"
-OUTPUT_DIR = BASE_DIR / "step_4_output"
-CACHE_DIR = BASE_DIR / "llm_cache_step4"
-PROMPT_DIR = BASE_DIR / "step_4_prompt_input"
+OUTPUT_DIR = BASE_DIR / "step_2_output"
+CACHE_DIR = BASE_DIR / "llm_cache_step2"
+PROMPT_DIR = BASE_DIR / "step_2_prompt_input"
 
 # Used only to keep cached LLM responses separated by synthetic variant.
 CURRENT_VARIANT_NAME = "single_dataset"
@@ -906,8 +906,8 @@ def write_evaluation_report(
     distance_matches = calculate_distance_matches(distances)
 
     with output_file.open("w", encoding="utf-8") as file:
-        file.write("=== Evaluation Step 4 LLM ===\n\n")
-        file.write(f"Step 4 output: {boundary_output_file}\n")
+        file.write("=== Evaluation Step 2 LLM ===\n\n")
+        file.write(f"Step 2 output: {boundary_output_file}\n")
         file.write(f"Prompt: {prompt_name}\n")
         file.write(f"Ground truth: {ground_truth_file}\n\n")
 
@@ -1006,7 +1006,7 @@ def write_summary(summary_rows: list[dict[str, str | int | float]], output_file:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run Step 4 LLM segmentation for all synthetic variants and "
+            "Run Step 2 LLM segmentation for all synthetic variants and "
             "write one evaluation report per variant and prompt."
         )
     )
@@ -1255,7 +1255,7 @@ def main() -> None:
 
             evaluation_output_file = (
                 prompt_output_dir
-                / f"evaluation_output_step4_{prompt_config.name}_{parameter_suffix}.txt"
+                / f"evaluation_output_step2_{prompt_config.name}_{parameter_suffix}.txt"
             )
 
             write_boundary_list(predicted_boundaries, boundary_output_file)
